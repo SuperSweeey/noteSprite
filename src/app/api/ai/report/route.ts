@@ -1,15 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { getAIConfig } from "@/lib/ai-config";
+import { buildSpiritPrompt, getAIConfig, getSpiritConfig } from "@/lib/ai-config";
 
-// PUT - save edited spirit reading
+function isFailedTranscription(note: { status: string; contentMd: string }) {
+  return note.status === "failed" || /\[失败\]|转写失败|转录失败/.test(note.contentMd || "");
+}
+
 export async function PUT(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
     const { noteId, report } = await req.json();
     if (!noteId || !report) {
       return NextResponse.json({ error: "missing params" }, { status: 400 });
+    }
+
+    const note = await prisma.note.findFirst({ where: { id: noteId, userId }, select: { id: true } });
+    if (!note) {
+      return NextResponse.json({ error: "not found" }, { status: 404 });
     }
 
     await prisma.aIResult.upsert({
@@ -35,61 +43,66 @@ export async function PUT(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
-    const {
-      noteId,
-      model: modelOverride,
-      apiKey: apiKeyOverride,
-      baseUrl: baseUrlOverride,
-    } = await req.json();
+    const { noteId, force, model: modelOverride, apiKey: apiKeyOverride, baseUrl: baseUrlOverride } = await req.json();
 
     if (!noteId) {
       return NextResponse.json({ error: "noteId required" }, { status: 400 });
     }
 
-    const config = await getAIConfig(userId, "report");
-    const model = (modelOverride && modelOverride.trim()) || config.model;
-    const apiKey = (apiKeyOverride && apiKeyOverride.trim()) || config.apiKey;
-    const baseUrl = (baseUrlOverride && baseUrlOverride.trim()) || config.baseUrl;
-
     const note = await prisma.note.findFirst({ where: { id: noteId, userId } });
     if (!note) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
+    if (isFailedTranscription(note)) {
+      return NextResponse.json({
+        report: "",
+        error: "这条笔记转写失败，暂不生成 AI 解读。请先重新转录，或编辑原文后再解读。",
+      });
+    }
 
     const existing = await prisma.aIResult.findUnique({ where: { noteId } });
-    if (existing?.actionItems && existing.actionItems.includes("## ")) {
+    if (!force && existing?.actionItems && existing.actionItems.includes("## ")) {
       return NextResponse.json({ report: existing.actionItems });
     }
 
+    const config = await getAIConfig(userId, "report");
+    const spirit = await getSpiritConfig(userId);
+    const model = String(modelOverride || "").trim() || config.model;
+    const apiKey = String(apiKeyOverride || "").trim() || config.apiKey;
+    const baseUrl = String(baseUrlOverride || "").trim() || config.baseUrl;
+
     if (!apiKey) {
-      return NextResponse.json({ report: "" });
+      return NextResponse.json({
+        report: "",
+        error: "没有可用的模型密钥。请在设置里重新填写模型 Key，或检查 .env 里的 DEEPSEEK_API_KEY。",
+      });
     }
 
-    const defaultPrompt =
-      "你是笔记精灵。请温柔、清楚地阅读用户笔记，并输出一份 Markdown 整理稿。\n\n" +
-      "请按以下结构输出：\n" +
-      "## 今天这页在说什么\n2到3句话概括核心意思。\n\n" +
-      "## 值得记住的几点\n用 3 到 5 条无序列表写出具体要点。\n\n" +
-      "## 可以接着想的问题\n给出 2 到 3 个自然的问题，帮助用户继续思考。\n\n" +
-      "语气要像住在笔记里的精灵，温柔、有陪伴感，但不要夸张，不要自称 AI。";
-    const systemPrompt = config.prompt || defaultPrompt;
+    const systemPrompt = buildSpiritPrompt(spirit, config.prompt);
 
-    const resp = await fetch(baseUrl + "/chat/completions", {
+    const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
         model,
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `笔记内容：\n${note.contentMd.slice(0, 6000)}` },
+          {
+            role: "user",
+            content: `请完整解读这条笔记，尽量让解读稿可以替代原文阅读。\n\n笔记原文：\n${note.contentMd.slice(0, 9000)}`,
+          },
         ],
-        max_tokens: 700,
-        temperature: 0.5,
+        max_tokens: 1800,
+        temperature: 0.45,
       }),
     });
 
     if (!resp.ok) {
-      return NextResponse.json({ report: "" });
+      const text = await resp.text();
+      return NextResponse.json({
+        report: "",
+        error: `模型连接失败：HTTP ${resp.status}。${text.slice(0, 220)}`,
+      });
     }
 
     const json = await resp.json();
@@ -112,6 +125,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ report });
   } catch (e: any) {
     console.error("[Report] Error:", e);
-    return NextResponse.json({ report: "" });
+    return NextResponse.json({ report: "", error: e.message });
   }
 }

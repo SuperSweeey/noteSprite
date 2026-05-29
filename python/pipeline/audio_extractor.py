@@ -1,44 +1,37 @@
 """
-音频提取模块
-使用ffmpeg提取音频
+Audio extraction with ffmpeg.
 """
 
 import subprocess
 from pathlib import Path
 from typing import Optional
 
-from downloaders.common import find_ffmpeg
+from downloaders.common import describe_ffmpeg_search, find_ffmpeg
 from pipeline.logger import Logger
 
 
 class AudioExtractor:
-    """音频提取器 - 使用ffmpeg"""
+    """Extract audio from video or normalize downloaded audio."""
 
     def __init__(self, output_dir: str = "./audio", ffmpeg_path: str = ""):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.ffmpeg_path = ffmpeg_path or find_ffmpeg() or "ffmpeg"
+        self.ffmpeg_path = find_ffmpeg(ffmpeg_path)
 
-        if not self._check_ffmpeg():
-            raise RuntimeError(f"ffmpeg未找到。请安装ffmpeg并添加到PATH。当前配置: {self.ffmpeg_path}")
-
-    def _check_ffmpeg(self) -> bool:
-        try:
-            result = subprocess.run(
-                [self.ffmpeg_path, "-version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
+        if not self.ffmpeg_path:
+            searched = describe_ffmpeg_search(ffmpeg_path)
+            raise RuntimeError(
+                "ffmpeg 未找到或不可执行。"
+                "请在设置页填写 ffmpeg.exe 的完整路径，或把 ffmpeg 加入 PATH。"
+                f"已尝试: {searched}"
             )
-            return result.returncode == 0
-        except:
-            return False
+
+        Logger.info(f"使用 ffmpeg: {self.ffmpeg_path}")
 
     def extract(self, video_path: str, output_filename: Optional[str] = None) -> str:
-        """从视频提取音频（输出16kHz单声道Opus）"""
         video_file = Path(video_path)
         if not video_file.exists():
-            raise FileNotFoundError(f"视频文件不存在: {video_path}")
+            raise FileNotFoundError(f"源文件不存在: {video_path}")
 
         if output_filename:
             output_file = self.output_dir / f"{output_filename}.opus"
@@ -52,9 +45,12 @@ class AudioExtractor:
             "-i",
             str(video_file),
             "-vn",
-            "-acodec", "libopus",
-            "-ar", "16000",
-            "-b:a", "16k",
+            "-acodec",
+            "libopus",
+            "-ar",
+            "16000",
+            "-b:a",
+            "16k",
             "-y",
             str(output_file),
         ]
@@ -62,10 +58,11 @@ class AudioExtractor:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg错误: {result.stderr}")
+            stderr = (result.stderr or "").strip()
+            raise RuntimeError(f"ffmpeg 提取音频失败: {stderr[-1200:]}")
 
-        if not output_file.exists():
-            raise RuntimeError("音频文件未创建")
+        if not output_file.exists() or output_file.stat().st_size == 0:
+            raise RuntimeError("ffmpeg 没有生成有效音频文件。")
 
         file_size = output_file.stat().st_size / (1024 * 1024)
         Logger.success(f"音频提取完成: {output_file.name} ({file_size:.2f} MB)")

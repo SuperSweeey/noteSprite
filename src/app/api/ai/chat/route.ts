@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { getAIConfig } from "@/lib/ai-config";
+import { buildSpiritPrompt, getAIConfig, getSpiritConfig } from "@/lib/ai-config";
 
-// GET — list messages for a conversation, or list all conversations
 export async function GET(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
@@ -20,127 +19,102 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ conversations });
     }
 
-    const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 100);
+    const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 100);
     const messages = await prisma.chatMessage.findMany({
       where: { userId, conversationId: conversationId || null },
-      orderBy: { createdAt: "asc" }, take: limit,
+      orderBy: { createdAt: "asc" },
+      take: limit,
     });
     return NextResponse.json({ messages });
-  } catch { return NextResponse.json({ messages: [], conversations: [] }); }
+  } catch {
+    return NextResponse.json({ messages: [], conversations: [] });
+  }
 }
 
-// POST — send a message (streaming by default)
 export async function POST(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
     const body = await req.json();
-    const { question, noteId, conversationId } = body;
+    const question = String(body.question || "").trim();
+    const noteId = body.noteId || undefined;
 
-    if (!question?.trim()) return NextResponse.json({ error: "问题不能为空" }, { status: 400 });
-
-    // Resolve AI config from settings (with client overrides as highest priority)
-    let convId = conversationId || null;
-    if (!convId) {
-      // Auto-create a conversation if none provided
-      const conv = await prisma.conversation.create({ data: { userId } });
-      convId = conv.id;
+    if (!question) {
+      return NextResponse.json({ error: "问题不能为空" }, { status: 400 });
     }
 
-    // Get AI config: client overrides > DB settings > env vars
-    const clientOverrides = {
-      apiKey: (body.apiKey && body.apiKey.trim()) || undefined,
-      baseUrl: (body.baseUrl && body.baseUrl.trim()) || undefined,
-      model: (body.model && body.model.trim()) || undefined,
-    };
+    let conversationId = body.conversationId || null;
+    if (!conversationId) {
+      const conv = await prisma.conversation.create({ data: { userId, title: question.slice(0, 40) } });
+      conversationId = conv.id;
+    }
+
     const dbConfig = await getAIConfig(userId, "chat");
+    const spirit = await getSpiritConfig(userId);
+    const apiKey = String(body.apiKey || "").trim() || dbConfig.apiKey;
+    const baseUrl = String(body.baseUrl || "").trim() || dbConfig.baseUrl;
+    const model = String(body.model || "").trim() || dbConfig.model;
+    const injectedPrompt = buildSpiritPrompt(
+      spirit,
+      "用户正在和你对话。你要优先结合当前笔记和最近笔记回答；如果用户是在学习一个问题，要按照已选择的领学模式互动。"
+    );
+    const systemPrompt = [injectedPrompt, dbConfig.prompt, String(body.prompt || "").trim()].filter(Boolean).join("\n\n");
 
-    const apiKey = clientOverrides.apiKey || dbConfig.apiKey || process.env.DEEPSEEK_API_KEY;
-    const baseUrl = clientOverrides.baseUrl || dbConfig.baseUrl || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1";
-    const model = clientOverrides.model || dbConfig.model || "deepseek-v4-flash";
-    const defaultPrompt = "你是「笔记精灵」，温柔、有洞察力的知识伙伴。用中文回答，语气自然。可以引用笔记内容。";
-    const systemPrompt = (body.prompt && body.prompt.trim()) || dbConfig.prompt || defaultPrompt;
-
-    if (!apiKey) return NextResponse.json({ answer: "未配置 API Key，请在设置中填入。" });
-
-    // Save user message
-    await prisma.chatMessage.create({ data: { userId, conversationId: convId, noteId: noteId || null, role: "user", content: question } });
-    // Touch conversation updatedAt
-    await prisma.conversation.update({ where: { id: convId }, data: { updatedAt: new Date() } });
-
-    // Build context: recent notes for global awareness
-    let context = "";
-    if (noteId) {
-      const note = await prisma.note.findFirst({ where: { id: noteId, userId } });
-      if (note) context = `【当前笔记】\n${note.contentMd.slice(0, 4000)}\n\n`;
-    }
-    const notes = await prisma.note.findMany({
-      where: { userId, deletedAt: null, id: noteId ? { not: noteId } : undefined },
-      orderBy: { createdAt: "desc" }, take: 15,
-      select: { contentMd: true, createdAt: true },
-    });
-    context += notes.map((n) => {
-      const d = new Date(n.createdAt);
-      return `[${d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}] ${n.contentMd.slice(0, 300)}`;
-    }).join("\n---\n").slice(0, 3000);
-
-    // History
-    const history = await prisma.chatMessage.findMany({
-      where: { userId, conversationId: convId },
-      orderBy: { createdAt: "desc" }, take: 10,
-    });
-    const historyMsgs = history.reverse().map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-
-    const useStream = body.stream !== false;
-
-    if (!useStream) {
-      const resp = await fetch(baseUrl + "/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: systemPrompt + (noteId ? "用户正在看某条笔记，请优先围绕它来回答。" : "") },
-            ...historyMsgs,
-            { role: "user", content: `我的笔记：\n${context || "（还没有笔记）"}\n\n问题：${question}` },
-          ],
-          max_tokens: 800, temperature: 0.7,
-        }),
+    if (!apiKey) {
+      return NextResponse.json({
+        answer: "我还没有拿到可用的模型密钥。请在设置里重新填写模型 Key，或检查 .env 里的 DEEPSEEK_API_KEY。",
+        conversationId,
       });
-      if (!resp.ok) {
-        const answer = `精灵打了个盹（${resp.status}）。稍后再试？`;
-        await prisma.chatMessage.create({ data: { userId, conversationId: convId, noteId: noteId || null, role: "assistant", content: answer } });
-        return NextResponse.json({ answer, conversationId: convId });
-      }
-      const json = await resp.json();
-      const answer = json.choices?.[0]?.message?.content || "";
-      await prisma.chatMessage.create({ data: { userId, conversationId: convId, noteId: noteId || null, role: "assistant", content: answer } });
-      return NextResponse.json({ answer, conversationId: convId });
     }
 
-    // Streaming path
-    const aiResp = await fetch(baseUrl + "/chat/completions", {
+    await prisma.chatMessage.create({
+      data: { userId, conversationId, noteId: noteId || null, role: "user", content: question },
+    });
+    await prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
+
+    const context = await buildNoteContext(userId, noteId);
+    const history = await prisma.chatMessage.findMany({
+      where: { userId, conversationId },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    });
+    const historyMsgs = history.reverse().map((m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content,
+    }));
+    const messages = [
+      { role: "system", content: systemPrompt + (noteId ? "\n用户正在查看某条笔记，请优先围绕当前笔记回答。" : "") },
+      ...historyMsgs,
+      {
+        role: "user",
+        content: `我的笔记上下文：\n${context || "（还没有可用笔记上下文）"}\n\n我的问题：${question}`,
+      },
+    ];
+
+    if (body.stream === false) {
+      const answer = await callModel({ baseUrl, apiKey, model, messages, maxTokens: 1000 });
+      await prisma.chatMessage.create({
+        data: { userId, conversationId, noteId: noteId || null, role: "assistant", content: answer },
+      });
+      return NextResponse.json({ answer, conversationId });
+    }
+
+    const aiResp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: systemPrompt + (noteId ? "用户正在看某条笔记，请优先围绕它来回答。" : "") },
-          ...historyMsgs,
-          { role: "user", content: `我的笔记：\n${context || "（还没有笔记）"}\n\n问题：${question}` },
-        ],
-        max_tokens: 800, temperature: 0.7, stream: true,
-      }),
+      body: JSON.stringify({ model, messages, max_tokens: 1000, temperature: 0.65, stream: true }),
     });
 
     if (!aiResp.ok) {
-      const answer = `精灵打了个盹（${aiResp.status}）。稍后再试？`;
-      await prisma.chatMessage.create({ data: { userId, conversationId: convId, noteId: noteId || null, role: "assistant", content: answer } });
-      return NextResponse.json({ answer, conversationId: convId });
+      const text = await aiResp.text();
+      const answer = `AI 刚才没连上模型（HTTP ${aiResp.status}）。${text.slice(0, 160)}`;
+      await prisma.chatMessage.create({
+        data: { userId, conversationId, noteId: noteId || null, role: "assistant", content: answer },
+      });
+      return NextResponse.json({ answer, conversationId });
     }
 
     const encoder = new TextEncoder();
     let fullAnswer = "";
-
     const stream = new ReadableStream({
       async start(controller) {
         const reader = aiResp.body!.getReader();
@@ -154,31 +128,30 @@ export async function POST(req: NextRequest) {
             const lines = buffer.split("\n");
             buffer = lines.pop() || "";
             for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const data = line.slice(6);
-                if (data === "[DONE]") continue;
-                try {
-                  const json = JSON.parse(data);
-                  const delta = json.choices?.[0]?.delta?.content;
-                  if (delta) {
-                    fullAnswer += delta;
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: delta })}\n\n`));
-                  }
-                } catch {}
-              }
+              if (!line.startsWith("data: ")) continue;
+              const data = line.slice(6);
+              if (data === "[DONE]") continue;
+              try {
+                const json = JSON.parse(data);
+                const delta = json.choices?.[0]?.delta?.content;
+                if (delta) {
+                  fullAnswer += delta;
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: delta })}\n\n`));
+                }
+              } catch {}
             }
           }
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ conversationId: convId })}\n\n`));
+
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ conversationId })}\n\n`));
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
           if (fullAnswer) {
             prisma.chatMessage.create({
-              data: { userId, conversationId: convId, noteId: noteId || null, role: "assistant", content: fullAnswer },
-            }).catch((e) => console.error("[Chat] DB save fail:", e));
+              data: { userId, conversationId, noteId: noteId || null, role: "assistant", content: fullAnswer },
+            }).catch((e) => console.error("[Chat] DB save failed:", e));
           }
         } catch (e: any) {
-          console.error("[Chat] stream err:", e.message);
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: "流中断了" })}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: `AI 回复中断：${e.message}` })}\n\n`));
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
         }
@@ -189,12 +162,11 @@ export async function POST(req: NextRequest) {
       headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
     });
   } catch (e: any) {
-    console.error("[Chat] err:", e.message);
-    return NextResponse.json({ answer: "网络似乎不太顺畅，再试一次？" });
+    console.error("[Chat] error:", e);
+    return NextResponse.json({ answer: `AI 对话失败：${e.message}` });
   }
 }
 
-// DELETE — clear conversation messages or delete whole conversation
 export async function DELETE(req: NextRequest) {
   const userId = await getCurrentUserId();
   const url = new URL(req.url);
@@ -206,7 +178,68 @@ export async function DELETE(req: NextRequest) {
     await prisma.conversation.deleteMany({ where: { userId, id: conversationId } });
     return NextResponse.json({ ok: true });
   }
-  // Legacy: clear by noteId only
+
   await prisma.chatMessage.deleteMany({ where: { userId, noteId: noteId || null } });
   return NextResponse.json({ ok: true });
+}
+
+async function buildNoteContext(userId: string, noteId?: string): Promise<string> {
+  const chunks: string[] = [];
+  if (noteId) {
+    const note = await prisma.note.findFirst({ where: { id: noteId, userId }, include: { aiResult: true } });
+    if (note) {
+      chunks.push("【当前笔记】");
+      chunks.push(note.contentMd.slice(0, 5000));
+      if (note.aiResult?.actionItems) {
+        chunks.push(`\n【已有 AI 解读】\n${note.aiResult.actionItems.slice(0, 3000)}`);
+      }
+    }
+  }
+
+  const recentNotes = await prisma.note.findMany({
+    where: { userId, deletedAt: null, id: noteId ? { not: noteId } : undefined },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: { title: true, contentMd: true, createdAt: true },
+  });
+  const recentContext = recentNotes
+    .map((note) => {
+      const date = new Date(note.createdAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+      return `[${date}] ${note.title || note.contentMd.slice(0, 40)}\n${note.contentMd.slice(0, 280)}`;
+    })
+    .join("\n---\n")
+    .slice(0, 3000);
+
+  if (recentContext) {
+    chunks.push("【最近笔记】");
+    chunks.push(recentContext);
+  }
+
+  return chunks.join("\n\n");
+}
+
+async function callModel({
+  baseUrl,
+  apiKey,
+  model,
+  messages,
+  maxTokens,
+}: {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  messages: any[];
+  maxTokens: number;
+}): Promise<string> {
+  const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.65 }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    return `AI 刚才没连上模型（HTTP ${resp.status}）。${text.slice(0, 160)}`;
+  }
+  const json = await resp.json();
+  return json.choices?.[0]?.message?.content || "";
 }

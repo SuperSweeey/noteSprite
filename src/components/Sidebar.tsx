@@ -1,6 +1,7 @@
 "use client";
 
-import { useRouter, usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { XiaoAoMark } from "@/components/XiaoAoMark";
 
 export function Sidebar() {
   const router = useRouter();
@@ -8,26 +9,39 @@ export function Sidebar() {
   const { greeting, sub } = getGreeting();
 
   return (
-    <aside className="w-[200px] min-h-screen flex flex-col bg-[var(--paper-sidebar)] border-r border-[var(--paper-border)]">
-      <div className="px-5 pt-6 pb-5">
-        <button onClick={() => router.push("/")} className="flex items-center gap-2">
-          <span className="text-lg">☕</span>
-          <span className="text-base font-medium text-[var(--ink)] font-prose">Noteflow</span>
+    <aside className="flex min-h-screen w-[220px] flex-col border-r border-[var(--paper-border)] bg-[var(--paper-sidebar)]">
+      <div className="px-5 pb-5 pt-6">
+        <button onClick={() => router.push("/")} className="flex items-center gap-3">
+          <XiaoAoMark size="md" variant="logo" />
+          <div className="text-left">
+            <span className="block font-prose text-base font-medium text-[var(--ink)]">NoteSprite</span>
+            <span className="block text-[11px] text-[var(--ink-faint)]">有精灵的真实笔记~</span>
+          </div>
         </button>
-        <p className="text-xs text-[var(--ink-faint)] mt-2.5 leading-relaxed">{greeting}<br />{sub}</p>
+        <p className="mt-2.5 text-xs leading-relaxed text-[var(--ink-faint)]">
+          {greeting}
+          <br />
+          {sub}
+        </p>
       </div>
 
-      <nav className="flex-1 px-3 space-y-0.5">
-        <NavItem href="/" icon="📝" label="今日" active={pathname === "/"} />
+      <nav className="flex-1 space-y-0.5 px-3">
+        <NavItem href="/" icon="📝" label="今天" active={pathname === "/"} />
         <NavItem href="/inbox" icon="📥" label="收集箱" active={pathname === "/inbox"} />
-        <NavItem href="/ai" icon="🧚" label="笔记精灵" active={pathname === "/ai"} />
+        <NavItem href="/ai" icon="✦" label="AI" active={pathname === "/ai"} />
       </nav>
 
-      <div className="px-4 py-3 border-t border-[var(--paper-border)]">
-        <button onClick={() => router.push("/")} className="w-full text-left px-3 py-2.5 rounded-lg text-sm text-[var(--ink-light)] hover:bg-[var(--paper-hover)] transition-colors">
+      <div className="border-t border-[var(--paper-border)] px-4 py-3">
+        <button
+          onClick={() => router.push("/")}
+          className="w-full rounded-lg px-3 py-2.5 text-left text-sm text-[var(--ink-light)] transition-colors hover:bg-[var(--paper-hover)]"
+        >
           ＋ 写一条新想法
         </button>
-        <button onClick={() => router.push("/settings")} className="w-full text-left px-3 py-2 rounded-lg text-sm text-[var(--ink-faint)] hover:bg-[var(--paper-hover)] transition-colors mt-1">
+        <button
+          onClick={() => router.push("/settings")}
+          className="mt-1 w-full rounded-lg px-3 py-2 text-left text-sm text-[var(--ink-faint)] transition-colors hover:bg-[var(--paper-hover)]"
+        >
           ⚙ 偏好设置
         </button>
       </div>
@@ -35,24 +49,40 @@ export function Sidebar() {
   );
 }
 
-function NavItem({ href, icon, label, active }: { href: string; icon: string; label: string; active: boolean }) {
+function NavItem({
+  href,
+  icon,
+  label,
+  active,
+}: {
+  href: string;
+  icon: string;
+  label: string;
+  active: boolean;
+}) {
   const router = useRouter();
+
   return (
-    <button onClick={() => router.push(href)}
-      className={`flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm transition-all relative ${
-        active ? "text-[var(--ink)] font-medium bg-[var(--paper-card)] shadow-sm" : "text-[var(--ink-light)] hover:bg-[var(--paper-hover)]"
-      }`}>
-      {active && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-[var(--gold)] rounded-full" />}
-      <span className="text-base">{icon}</span>{label}
+    <button
+      onClick={() => router.push(href)}
+      className={`relative flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all ${
+        active
+          ? "bg-[var(--paper-card)] font-medium text-[var(--ink)] shadow-sm"
+          : "text-[var(--ink-light)] hover:bg-[var(--paper-hover)]"
+      }`}
+    >
+      {active && <span className="absolute bottom-1.5 left-0 top-1.5 w-0.5 rounded-full bg-[var(--gold)]" />}
+      <span className="text-base">{icon}</span>
+      {label}
     </button>
   );
 }
 
 function getGreeting(): { greeting: string; sub: string } {
-  const h = new Date().getHours();
-  if (h < 6) return { greeting: "夜深了", sub: "写完这句就去睡吧" };
-  if (h < 9) return { greeting: "晨安", sub: "今日也慢慢写" };
-  if (h < 14) return { greeting: "午后", sub: "泡杯茶，慢慢来" };
-  if (h < 19) return { greeting: "向晚", sub: "理一理今日所得" };
-  return { greeting: "入夜", sub: "安静地写些什么" };
+  const hour = new Date().getHours();
+  if (hour < 6) return { greeting: "夜深了。", sub: "把最后一个念头放下，就安心去睡。" };
+  if (hour < 9) return { greeting: "早安。", sub: "今天也慢慢写，慢慢想。" };
+  if (hour < 14) return { greeting: "午后好。", sub: "记一页，灵感就不会轻轻溜走。" };
+  if (hour < 19) return { greeting: "傍晚好。", sub: "把今天想到的事，收成自己的脉络。" };
+  return { greeting: "晚上好。", sub: "安静写一点，AI 会陪着你。" };
 }

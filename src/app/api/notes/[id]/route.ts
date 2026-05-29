@@ -4,14 +4,38 @@ import { prisma } from "@/lib/prisma";
 import { parseTags, stripMarkdown } from "@/lib/tags";
 import { ensureTagHierarchy } from "@/lib/tags-db";
 
-// PATCH /api/notes/[id] — update note
+export async function GET(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const userId = await getCurrentUserId();
+    const note = await prisma.note.findFirst({
+      where: { id: params.id, userId, deletedAt: null },
+      include: {
+        tags: { include: { tag: true }, orderBy: { tag: { fullPath: "asc" } } },
+        aiResult: true,
+      },
+    });
+
+    if (!note) {
+      return NextResponse.json({ error: "Note not found" }, { status: 404 });
+    }
+
+    return NextResponse.json(note);
+  } catch (e: any) {
+    console.error("GET /api/notes/[id] error:", e);
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
+}
+
 export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
     const userId = await getCurrentUserId();
-    const { content, title, status, knowledgeBaseId } = await req.json();
+    const { content, title, status, knowledgeBaseId, restore } = await req.json();
 
     const note = await prisma.note.findFirst({
       where: { id: params.id, userId },
@@ -25,7 +49,6 @@ export async function PATCH(
       data.contentMd = content;
       data.plainText = stripMarkdown(content);
 
-      // Re-parse tags with full hierarchy
       const tagPaths = parseTags(content);
       await prisma.noteTag.deleteMany({ where: { noteId: note.id } });
       const allIds: string[] = [];
@@ -39,28 +62,49 @@ export async function PATCH(
     }
     if (title !== undefined) data.title = title;
     if (status !== undefined) data.status = status;
+    if (restore) {
+      data.status = "inbox";
+      data.deletedAt = null;
+    }
     if (knowledgeBaseId !== undefined) data.knowledgeBaseId = knowledgeBaseId;
 
     const updated = await prisma.note.update({
       where: { id: params.id },
       data,
-      include: { tags: { include: { tag: true } }, aiResult: true },
+      include: {
+        tags: { include: { tag: true }, orderBy: { tag: { fullPath: "asc" } } },
+        aiResult: true,
+      },
     });
 
     return NextResponse.json(updated);
   } catch (e: any) {
-    console.error("PATCH /api/notes error:", e);
+    console.error("PATCH /api/notes/[id] error:", e);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
 
-// DELETE /api/notes/[id] — soft delete
 export async function DELETE(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
     const userId = await getCurrentUserId();
+    const tagId = new URL(req.url).searchParams.get("tagId");
+
+    if (tagId) {
+      const note = await prisma.note.findFirst({
+        where: { id: params.id, userId },
+        select: { id: true },
+      });
+      if (!note) {
+        return NextResponse.json({ error: "Note not found" }, { status: 404 });
+      }
+
+      await prisma.noteTag.deleteMany({ where: { noteId: params.id, tagId } });
+      return NextResponse.json({ ok: true });
+    }
+
     await prisma.note.updateMany({
       where: { id: params.id, userId },
       data: { status: "deleted", deletedAt: new Date() },

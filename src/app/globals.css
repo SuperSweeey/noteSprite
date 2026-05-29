@@ -3,91 +3,179 @@
 @tailwind utilities;
 
 :root {
-  --paper-bg: #F8F4EC;
-  --paper-card: #FFFDF8;
-  --paper-sidebar: #F3EDE3;
-  --paper-border: #E5DCCF;
-  --ink: #2F2A24;
-  --ink-light: #8A8176;
-  --ink-faint: #B8B0A6;
-  --gold: #B88A45;
-  --gold-light: #F6EFE2;
-  --sage: #6F8A6A;
-  --sage-light: #EFF3ED;
+  --paper-bg: #f5f5f7;
+  --paper-card: #ffffff;
+  --paper-sidebar: rgba(251, 251, 253, 0.86);
+  --paper-border: rgba(0, 0, 0, 0.08);
+  --paper-hover: rgba(0, 0, 0, 0.045);
+  --paper-soft: #f7f7f9;
+  --ink: #111111;
+  --ink-light: #4f5661;
+  --ink-faint: #8a9099;
+  --gold: #2563eb;
+  --gold-light: rgba(37, 99, 235, 0.09);
+  --accent-blue: #2563eb;
+  --sage: #2f3948;
+  --sage-light: rgba(47, 57, 72, 0.08);
+  --glow: 0 18px 45px rgba(0, 0, 0, 0.055);
 }
 
-html { font-size: 16px; }
+html {
+  font-size: 16px;
+}
 
 body {
-  @apply antialiased;
-  font-family: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "HarmonyOS Sans", system-ui, sans-serif;
+  min-height: 100vh;
   background: var(--paper-bg);
   color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Paper texture overlay */
-body::before {
-  content: "";
-  position: fixed; inset: 0; pointer-events: none; z-index: 9998;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
-  opacity: 0.6;
+button,
+input,
+textarea,
+select {
+  font: inherit;
 }
 
-/* Prose / note content uses serif */
-.font-prose { font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", "Georgia", serif; }
+.font-prose {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+}
 
-/* Paper card */
 .paper-card {
-  background: var(--paper-card);
-  border-radius: 18px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02);
   border: 1px solid var(--paper-border);
-  transition: box-shadow 0.2s, transform 0.2s;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: var(--glow);
+  backdrop-filter: blur(22px);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
 }
+
 .paper-card:hover {
-  box-shadow: 0 3px 8px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.03);
-  transform: translateY(-1px);
+  border-color: rgba(0, 0, 0, 0.12);
+  box-shadow: 0 22px 55px rgba(0, 0, 0, 0.07);
 }
 
-/* Ruled paper textarea */
-.ruled-paper {
-  background-image: repeating-linear-gradient(
-    var(--paper-card) 0px, var(--paper-card) 27px, var(--paper-border) 27px, var(--paper-border) 28px
-  );
-  line-height: 28px;
-  background-attachment: local;
+.tag-highlight {
+  color: var(--accent-blue);
+  cursor: pointer;
+  font-weight: 500;
 }
 
-/* Tag highlight */
-.tag-highlight { color: var(--gold); cursor: pointer; font-weight: 500; }
-.tag-highlight:hover { color: #9A7230; }
+.tag-highlight:hover {
+  text-decoration: underline;
+}
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--paper-border); border-radius: 2px; }
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
 
-/* Markdown rendered content */
-.prose-note { font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", "Georgia", serif; }
-.prose-note h2 { font-size: 1.25rem; font-weight: 600; color: var(--ink); margin: 1.5em 0 0.5em; padding-bottom: 0.3em; border-bottom: 1px solid var(--paper-border); }
-.prose-note h3 { font-size: 1.1rem; font-weight: 600; color: var(--ink); margin: 1.2em 0 0.4em; }
-.prose-note p { margin: 0.6em 0; line-height: 1.8; color: var(--ink); font-size: 1rem; }
-.prose-note strong { color: var(--ink); font-weight: 600; }
-.prose-note em { color: var(--ink-light); }
-.prose-note ul, .prose-note ol { padding-left: 1.5em; margin: 0.6em 0; }
-.prose-note li { margin: 0.3em 0; line-height: 1.7; }
-.prose-note table { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: 0.9rem; border-radius: 8px; overflow: hidden; border: 1px solid var(--paper-border); }
-.prose-note th { background: var(--gold-light); color: var(--ink); font-weight: 600; padding: 10px 14px; text-align: left; border-bottom: 2px solid var(--gold); }
-.prose-note td { padding: 10px 14px; border-bottom: 1px solid var(--paper-border); color: var(--ink); }
-.prose-note tr:last-child td { border-bottom: none; }
-.prose-note tr:hover td { background: var(--paper-bg); }
-.prose-note blockquote { border-left: 3px solid var(--gold); padding: 0.5em 1em; margin: 0.8em 0; background: var(--gold-light); border-radius: 0 8px 8px 0; color: var(--ink-light); }
-.prose-note code { background: var(--paper-bg); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
-.prose-note pre { background: var(--paper-bg); padding: 1em; border-radius: 8px; overflow-x: auto; border: 1px solid var(--paper-border); }
-.prose-note a { color: var(--gold); text-decoration: underline; }
-.prose-note hr { border: none; border-top: 1px solid var(--paper-border); margin: 2em 0; }
+::-webkit-scrollbar-track {
+  background: transparent;
+}
 
-/* Animations */
-@keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-.animate-fade-up { animation: fadeUp 0.3s ease-out; }
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.prose-note {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+}
+
+.prose-note h2 {
+  margin: 1.65em 0 0.6em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid var(--paper-border);
+  font-size: 1.22rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.prose-note h3 {
+  margin: 1.15em 0 0.45em;
+  font-size: 1.02rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.prose-note p {
+  margin: 0.7em 0;
+  font-size: 1rem;
+  line-height: 1.9;
+  color: var(--ink);
+}
+
+.prose-note strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.prose-note em {
+  color: var(--ink-light);
+}
+
+.prose-note ul,
+.prose-note ol {
+  margin: 0.7em 0;
+  padding-left: 1.45em;
+}
+
+.prose-note li {
+  margin: 0.36em 0;
+  line-height: 1.8;
+}
+
+.prose-note blockquote {
+  margin: 1em 0;
+  border-left: 3px solid var(--accent-blue);
+  border-radius: 0 10px 10px 0;
+  background: #f7f8fb;
+  padding: 0.75em 1em;
+  color: var(--ink-light);
+}
+
+.prose-note code {
+  border-radius: 6px;
+  background: #f1f2f4;
+  padding: 2px 6px;
+  font-size: 0.9em;
+}
+
+.prose-note pre {
+  overflow-x: auto;
+  border: 1px solid var(--paper-border);
+  border-radius: 10px;
+  background: #f7f8fb;
+  padding: 1em;
+}
+
+.prose-note a {
+  color: var(--accent-blue);
+  text-decoration: underline;
+}
+
+.prose-note hr {
+  margin: 2em 0;
+  border: none;
+  border-top: 1px solid var(--paper-border);
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fadeUp 0.24s ease-out;
+}

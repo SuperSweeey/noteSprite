@@ -6,6 +6,10 @@ import { ensureTagHierarchy } from "@/lib/tags-db";
 import { analyzeNote } from "@/lib/ai";
 import { getAIConfig } from "@/lib/ai-config";
 
+function shouldSkipAIAnalysis(content: string) {
+  return /\[失败\]|转写失败|转录失败/.test(content || "");
+}
+
 // POST /api/notes — create a note
 export async function POST(req: NextRequest) {
   try {
@@ -51,7 +55,9 @@ export async function POST(req: NextRequest) {
     }
 
     // Step 4: trigger AI analysis in background (don't wait)
-    runAIAnalysis(note.id, content);
+    if (!shouldSkipAIAnalysis(content)) {
+      runAIAnalysis(note.id, content);
+    }
 
     return NextResponse.json(note, { status: 201 });
   } catch (e: any) {
@@ -68,12 +74,34 @@ export async function GET(req: NextRequest) {
     const status = url.searchParams.get("status") || undefined;
     const tag = url.searchParams.get("tag") || undefined;
     const search = url.searchParams.get("search") || undefined;
+    const source = url.searchParams.get("source") || undefined;
+    const hasAI = url.searchParams.get("hasAI") || undefined;
+    const view = url.searchParams.get("view") || "active";
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 100);
     const offset = parseInt(url.searchParams.get("offset") || "0");
 
-    const where: any = { userId, deletedAt: null };
+    const where: any = { userId };
+    if (view === "trash") {
+      where.deletedAt = { not: null };
+    } else {
+      where.deletedAt = null;
+    }
     if (status) where.status = status;
-    if (search) where.plainText = { contains: search };
+    if (source) {
+      where.type = source === "manual" ? "manual" : source;
+    }
+    if (search) {
+      where.OR = [
+        { title: { contains: search } },
+        { plainText: { contains: search } },
+        { contentMd: { contains: search } },
+        { aiResult: { is: { summary: { contains: search } } } },
+        { aiResult: { is: { actionItems: { contains: search } } } },
+        { tags: { some: { tag: { fullPath: { contains: search } } } } },
+      ];
+    }
+    if (hasAI === "yes") where.aiResult = { isNot: null };
+    if (hasAI === "no") where.aiResult = { is: null };
     if (tag) {
       where.tags = {
         some: {
@@ -86,7 +114,7 @@ export async function GET(req: NextRequest) {
       prisma.note.findMany({
         where,
         include: { tags: { include: { tag: true } }, aiResult: true },
-        orderBy: { createdAt: "desc" },
+        orderBy: { updatedAt: "desc" },
         take: limit,
         skip: offset,
       }),

@@ -1,16 +1,17 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { MarkdownView } from "@/components/MarkdownView";
+import { XiaoAoMark } from "@/components/XiaoAoMark";
 
 const suggestions = [
-  { icon: "📊", text: "帮我梳理一下，最近都在关注哪些主题？" },
-  { icon: "🔗", text: "我笔记里有没有相互矛盾的观点？" },
-  { icon: "⏳", text: "看看我一周前在思考什么？" },
-  { icon: "🪞", text: "有哪些旧笔记，值得现在重新翻开？" },
-  { icon: "💡", text: "根据我的笔记，给我一个值得思考的问题" },
-  { icon: "✍️", text: "帮我写一段总结，概括我最近的思考" },
+  "帮我串一下最近几页笔记，看看它们在说什么。",
+  "这些笔记里有没有互相呼应的主题？",
+  "从这周的笔记里，给我一个值得继续想的问题。",
+  "哪些旧笔记值得今天重新翻开？",
+  "根据我的笔记，帮我看清最近在往哪个方向走。",
+  "帮我写一段近期总结。",
 ];
 
 export default function AIPage() {
@@ -22,194 +23,203 @@ export default function AIPage() {
   const [showConvList, setShowConvList] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
 
-  // Load conversations list
   const loadConversations = () => {
     fetch("/api/ai/chat?list=1")
-      .then((r) => r.json())
-      .then((d) => setConversations(d.conversations || []));
+      .then((resp) => resp.json())
+      .then((data) => setConversations(data.conversations || []))
+      .catch(() => setConversations([]));
   };
-  useEffect(() => { loadConversations(); }, []);
 
-  // Load messages for current conversation
   useEffect(() => {
-    if (!conversationId) { setMessages([]); return; }
+    loadConversations();
+  }, []);
+
+  useEffect(() => {
+    if (!conversationId) {
+      setMessages([]);
+      return;
+    }
     fetch(`/api/ai/chat?conversationId=${conversationId}`)
-      .then((r) => r.json())
-      .then((d) => setMessages(d.messages || []));
+      .then((resp) => resp.json())
+      .then((data) => setMessages(data.messages || []));
   }, [conversationId]);
 
-  useEffect(() => { chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" }); }, [messages]);
+  useEffect(() => {
+    chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages]);
 
   const send = async (text?: string) => {
-    const q = (text || input).trim();
-    if (!q || loading) return;
-    setMessages((m) => [...m, { role: "user", content: q }]);
-    setInput(""); setLoading(true);
+    const question = (text || input).trim();
+    if (!question || loading) return;
+    setMessages((current) => [...current, { role: "user", content: question }]);
+    setInput("");
+    setLoading(true);
 
     try {
       const resp = await fetch("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q, conversationId: conversationId || null, stream: true }),
+        body: JSON.stringify({ question, conversationId: conversationId || null, stream: true }),
       });
 
       if (!resp.ok || resp.headers.get("content-type")?.includes("application/json")) {
         const data = await resp.json();
         if (data.conversationId) setConversationId(data.conversationId);
-        setMessages((m) => [...m, { role: "assistant", content: data.answer || "..." }]);
+        setMessages((current) => [...current, { role: "assistant", content: data.answer || "精灵刚才停了一下，我们再试一次。" }]);
         loadConversations();
         setLoading(false);
         return;
       }
 
-      // Streaming
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
       let content = "";
-      setMessages((m) => [...m, { role: "assistant", content: "" }]);
+      setMessages((current) => [...current, { role: "assistant", content: "" }]);
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         decoder.decode(value, { stream: true }).split("\n").forEach((line) => {
-          if (line.startsWith("data: ")) {
-            const data = line.slice(6);
-            if (data === "[DONE]") return;
-            try {
-              const json = JSON.parse(data);
-              if (json.content) {
-                content += json.content;
-                setMessages((m) => { const u = [...m]; u[u.length - 1] = { role: "assistant", content }; return u; });
-              }
-              if (json.conversationId) { setConversationId(json.conversationId); loadConversations(); }
-              if (json.error) {
-                setMessages((m) => { const u = [...m]; u[u.length - 1] = { role: "assistant", content: content || json.error }; return u; });
-              }
-            } catch {}
-          }
+          if (!line.startsWith("data: ")) return;
+          const payload = line.slice(6);
+          if (payload === "[DONE]") return;
+          try {
+            const json = JSON.parse(payload);
+            if (json.content) {
+              content += json.content;
+              setMessages((current) => {
+                const updated = [...current];
+                updated[updated.length - 1] = { role: "assistant", content };
+                return updated;
+              });
+            }
+            if (json.conversationId) {
+              setConversationId(json.conversationId);
+              loadConversations();
+            }
+          } catch {}
         });
       }
     } catch {
-      setMessages((m) => [...m, { role: "assistant", content: "网络不太顺畅..." }]);
-    } finally { setLoading(false); }
+      setMessages((current) => [...current, { role: "assistant", content: "连接不太稳，我们再试一次。" }]);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const newConversation = () => { setConversationId(null); setMessages([]); setShowConvList(false); };
-  const switchConversation = (id: string) => { setConversationId(id); setShowConvList(false); };
-  const deleteConversation = async (id: string) => {
-    await fetch(`/api/ai/chat?conversationId=${id}`, { method: "DELETE" });
-    if (conversationId === id) { setConversationId(null); setMessages([]); }
-    loadConversations();
+  const newConversation = () => {
+    setConversationId(null);
+    setMessages([]);
+    setShowConvList(false);
   };
 
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />
-      <main className="flex-1 flex flex-col bg-[var(--paper-bg)]">
-        {/* Header with conversation controls */}
-        <div className="flex items-center justify-between px-6 py-3 border-b border-[var(--paper-border)] bg-[var(--paper-card)]">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">🧚</span>
-            <span className="text-sm font-medium text-[var(--ink)]">笔记精灵</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <button onClick={() => setShowConvList(!showConvList)} className="text-xs text-[var(--ink-faint)] hover:text-[var(--gold)] px-2 py-1 rounded transition-colors" title="对话列表">☰ 历史</button>
-            <button onClick={newConversation} className="text-xs text-[var(--ink-faint)] hover:text-[var(--gold)] px-2 py-1 rounded transition-colors" title="新建对话">+ 新建</button>
-          </div>
-        </div>
-
-        {/* Conversation list dropdown */}
-        {showConvList && (
-          <div className="border-b border-[var(--paper-border)] bg-[var(--paper-card)] max-h-[240px] overflow-y-auto shadow-sm">
-            <div className="px-4 py-2 text-xs text-[var(--ink-faint)] flex items-center justify-between">
-              <span>对话记录</span>
-              <button onClick={newConversation} className="text-[var(--gold)]">+ 新建</button>
+      <main className="flex flex-1 flex-col bg-[var(--paper-bg)]">
+        <header className="border-b border-[var(--paper-border)] bg-white/70 px-6 py-4 backdrop-blur-xl">
+          <div className="mx-auto flex max-w-[900px] items-center justify-between">
+            <div className="flex items-center gap-3">
+              <XiaoAoMark size="md" variant="logo" />
+              <div>
+                <h1 className="text-lg font-semibold text-[var(--ink)]">精灵助手</h1>
+                <p className="text-xs text-[var(--ink-faint)]">围绕你的真实笔记，整理、追问、连接。</p>
+              </div>
             </div>
-            {conversations.length === 0 ? (
-              <p className="px-4 py-6 text-xs text-[var(--ink-faint)] text-center">还没有对话记录</p>
-            ) : (
-              conversations.map((c) => (
-                <div
-                  key={c.id}
-                  className={`flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-[var(--paper-hover)] text-sm transition-colors ${c.id === conversationId ? "bg-[var(--gold-light)]" : ""}`}
-                  onClick={() => switchConversation(c.id)}
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[var(--ink)] truncate">{c.messages?.[0]?.content?.slice(0, 50) || "新对话"}</p>
-                    <p className="text-xs text-[var(--ink-faint)] mt-0.5">{new Date(c.updatedAt).toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</p>
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); deleteConversation(c.id); }}
-                    className="text-xs text-red-400 hover:underline ml-3 shrink-0"
-                  >删除</button>
-                </div>
-              ))
-            )}
+            <div className="flex items-center gap-2">
+              <button onClick={() => setShowConvList(!showConvList)} className="rounded-[8px] border border-[var(--paper-border)] bg-white px-3 py-1.5 text-sm text-[var(--ink-light)]">
+                历史
+              </button>
+              <button onClick={newConversation} className="rounded-[8px] bg-[var(--ink)] px-3 py-1.5 text-sm text-white">
+                新对话
+              </button>
+            </div>
           </div>
+        </header>
+
+        {showConvList && (
+          <section className="border-b border-[var(--paper-border)] bg-white/60">
+            <div className="mx-auto max-h-[230px] max-w-[900px] overflow-y-auto px-6 py-3">
+              {conversations.length === 0 ? (
+                <p className="py-6 text-center text-sm text-[var(--ink-faint)]">还没有对话。</p>
+              ) : (
+                conversations.map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    onClick={() => {
+                      setConversationId(conversation.id);
+                      setShowConvList(false);
+                    }}
+                    className="mb-2 block w-full rounded-[10px] border border-[var(--paper-border)] bg-white px-4 py-3 text-left text-sm hover:bg-[var(--paper-soft)]"
+                  >
+                    <p className="truncate text-[var(--ink)]">{conversation.messages?.[0]?.content?.slice(0, 70) || "新的对话"}</p>
+                    <p className="mt-1 text-xs text-[var(--ink-faint)]">{new Date(conversation.updatedAt).toLocaleString("zh-CN")}</p>
+                  </button>
+                ))
+              )}
+            </div>
+          </section>
         )}
 
-        {/* Messages area */}
         <div ref={chatRef} className="flex-1 overflow-y-auto">
-          <div className="max-w-[720px] mx-auto px-6 py-6 space-y-4">
+          <div className="mx-auto max-w-[900px] px-6 py-8">
             {messages.length === 0 ? (
-              <div className="text-center pt-16 pb-8">
-                <p className="text-4xl mb-4">🧚</p>
-                <h1 className="text-xl font-medium text-[var(--ink)] font-prose">笔记精灵</h1>
-                <p className="text-sm text-[var(--ink-faint)] mt-2 leading-relaxed">
-                  我读过了你的笔记。<br />需要时唤我，不扰你。
+              <section className="paper-card p-7">
+                <h2 className="text-2xl font-semibold text-[var(--ink)]">你想和笔记聊什么？</h2>
+                <p className="mt-2 max-w-[560px] text-sm leading-7 text-[var(--ink-faint)]">
+                  精灵会优先从你的笔记里找线索。它可以帮你串主题、找关联、生成问题，也可以陪你把一个模糊想法理清楚。
                 </p>
-                <div className="mt-8 space-y-2.5">
-                  {suggestions.map((s, i) => (
+                <div className="mt-7 grid gap-2 md:grid-cols-2">
+                  {suggestions.map((item) => (
                     <button
-                      key={i}
-                      onClick={() => send(s.text)}
-                      className="paper-card w-full text-left px-5 py-3.5 text-sm text-[var(--ink-light)] hover:border-[var(--gold)] transition-colors"
-                    >{s.icon} {s.text}</button>
+                      key={item}
+                      onClick={() => send(item)}
+                      className="rounded-[10px] border border-[var(--paper-border)] bg-white px-4 py-3 text-left text-sm text-[var(--ink-light)] hover:bg-[var(--paper-soft)] hover:text-[var(--ink)]"
+                    >
+                      {item}
+                    </button>
                   ))}
                 </div>
-              </div>
+              </section>
             ) : (
-              messages.map((m, i) => (
-                <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} animate-fade-up`}>
-                  <div className={`max-w-[85%] px-4 py-3 text-sm leading-relaxed ${
-                    m.role === "user"
-                      ? "bg-[var(--gold-light)] text-[var(--ink)] rounded-2xl rounded-br-sm"
-                      : "paper-card rounded-2xl rounded-bl-sm"
-                  }`}>
-                    {m.role === "assistant" ? <MarkdownView content={m.content} /> : m.content}
+              <div className="space-y-4">
+                {messages.map((message, index) => (
+                  <div key={index} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                    <div className={`max-w-[82%] rounded-[12px] px-4 py-3 text-sm leading-7 ${
+                      message.role === "user" ? "bg-[var(--ink)] text-white" : "border border-[var(--paper-border)] bg-white text-[var(--ink)]"
+                    }`}>
+                      {message.role === "assistant" ? <MarkdownView content={message.content} /> : message.content}
+                    </div>
                   </div>
-                </div>
-              ))
-            )}
-            {loading && !(messages[messages.length - 1]?.role === "assistant" && messages[messages.length - 1]?.content) && (
-              <div className="flex justify-start animate-fade-up">
-                <div className="paper-card px-5 py-3.5 flex items-center gap-2 text-sm text-[var(--ink-faint)] rounded-2xl rounded-bl-sm">
-                  <span className="w-3 h-3 border-2 border-[var(--gold)] border-t-transparent rounded-full animate-spin" />思考中...
-                </div>
+                ))}
+                {loading && (
+                  <div className="flex justify-start">
+                    <div className="rounded-[12px] border border-[var(--paper-border)] bg-white px-4 py-3 text-sm text-[var(--ink-faint)]">
+                      AI 正在思考...
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
         </div>
 
-        {/* Input area */}
-        <div className="border-t border-[var(--paper-border)] bg-[var(--paper-card)]">
-          <div className="max-w-[720px] mx-auto px-6 py-4 flex items-center gap-2">
+        <footer className="border-t border-[var(--paper-border)] bg-white/70 backdrop-blur-xl">
+          <div className="mx-auto flex max-w-[900px] items-center gap-2 px-6 py-4">
             <input
-              className="flex-1 px-4 py-3 text-sm rounded-xl outline-none border border-[var(--paper-border)] bg-[var(--paper-bg)] text-[var(--ink)]"
-              style={{ fontFamily: "inherit" }}
-              placeholder="问笔记精灵..."
+              className="flex-1 rounded-[12px] border border-[var(--paper-border)] bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent-blue)]"
+              placeholder="问问你的 AI..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") send();
+              }}
             />
-            <button
-              onClick={() => send()}
-              disabled={!input.trim() || loading}
-              className="w-10 h-10 flex items-center justify-center rounded-full text-white transition-all active:scale-95 disabled:opacity-25"
-              style={{ background: "var(--gold)" }}
-            >↑</button>
+            <button onClick={() => send()} disabled={!input.trim() || loading} className="rounded-[12px] bg-[var(--ink)] px-4 py-3 text-sm text-white disabled:opacity-35">
+              发送
+            </button>
           </div>
-        </div>
+        </footer>
       </main>
     </div>
   );

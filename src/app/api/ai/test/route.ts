@@ -1,37 +1,59 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
 import { getAIConfig } from "@/lib/ai-config";
+
+function keyTail(key: string) {
+  return key ? key.slice(-4) : "";
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const { model, apiKey, baseUrl, providerId } = await req.json();
+    const userId = await getCurrentUserId();
+    const body = await req.json();
+    const config = await getAIConfig(userId, "chat");
 
-    let key = apiKey;
-    let url = baseUrl;
+    const requestKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+    const key = requestKey || config.apiKey;
+    const keySource = requestKey ? "当前输入框" : "已保存配置或环境变量";
+    const url = String(body.baseUrl || "").trim() || config.baseUrl;
+    const selectedModel = String(body.model || "").trim() || config.model;
 
-    // If providerId is given, resolve real key + baseUrl from DB
-    if (providerId && !key) {
-      const userId = await getCurrentUserId();
-      const user = await prisma.user.findUnique({ where: { id: userId } });
-      let settings: any = {};
-      try { settings = JSON.parse(user?.settings || "{}"); } catch {}
-      const provider = settings.providers?.find((p: any) => p.id === providerId);
-      if (provider) {
-        key = provider.apiKey;
-        url = url || provider.baseUrl;
-      }
+    if (!key) {
+      return NextResponse.json({
+        ok: false,
+        keySource,
+        keyTail: "",
+        error: "没有可用的模型密钥。请在设置里重新填写，或检查 .env 里的 DEEPSEEK_API_KEY。",
+      });
     }
 
-    key = key || process.env.DEEPSEEK_API_KEY;
-    if (!key) return NextResponse.json({ ok: false, error: "未配置密钥" });
-
-    const resp = await fetch((url || process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1") + "/chat/completions", {
+    const resp = await fetch(`${url.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model: model || "deepseek-v4-flash", messages: [{ role: "user", content: "你好" }], max_tokens: 10 }),
+      body: JSON.stringify({
+        model: selectedModel,
+        messages: [{ role: "user", content: "你好，请回复 OK。" }],
+        max_tokens: 16,
+        temperature: 0,
+      }),
     });
-    if (!resp.ok) { const e = await resp.text(); return NextResponse.json({ ok: false, error: e.slice(0, 100) }); }
-    return NextResponse.json({ ok: true });
-  } catch (e: any) { return NextResponse.json({ ok: false, error: e.message }); }
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      return NextResponse.json({
+        ok: false,
+        keySource,
+        keyTail: keyTail(key),
+        error: `模型连接失败：HTTP ${resp.status}。${text.slice(0, 220)}`,
+      });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      keySource,
+      keyTail: keyTail(key),
+    });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e.message });
+  }
 }

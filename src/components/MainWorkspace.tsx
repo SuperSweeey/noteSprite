@@ -8,6 +8,7 @@ interface Note {
   id: string;
   title?: string;
   contentMd: string;
+  sourceUrl?: string | null;
   type: string;
   status: string;
   createdAt: string;
@@ -37,19 +38,30 @@ export function MainWorkspace() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTag, setActiveTag] = useState<string | null>(searchParams.get("tag"));
+  const [query, setQuery] = useState(searchParams.get("search") || "");
+  const [view, setView] = useState<"active" | "trash">("active");
+  const [statusFilter, setStatusFilter] = useState<"all" | "inbox" | "processing" | "failed" | "archived">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "manual" | "douyin" | "bilibili" | "youtube" | "xiaohongshu" | "link">("all");
+  const [aiFilter, setAiFilter] = useState<"all" | "yes" | "no">("all");
   const [mode, setMode] = useState<"write" | "link">("write");
   const [linkUrl, setLinkUrl] = useState("");
   const [linkMsg, setLinkMsg] = useState("");
   const [justSaved, setJustSaved] = useState(false);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
 
   const fetchNotes = useCallback(async () => {
     const params = new URLSearchParams({ limit: "80" });
     if (activeTag) params.set("tag", activeTag);
+    if (query.trim()) params.set("search", query.trim());
+    if (view === "trash") params.set("view", "trash");
+    if (statusFilter !== "all" && view !== "trash") params.set("status", statusFilter);
+    if (sourceFilter !== "all") params.set("source", sourceFilter);
+    if (aiFilter !== "all") params.set("hasAI", aiFilter);
     const resp = await fetch(`/api/notes?${params}`);
     const data = await resp.json();
     setNotes(data.notes || []);
     setLoading(false);
-  }, [activeTag]);
+  }, [activeTag, query, view, statusFilter, sourceFilter, aiFilter]);
 
   useEffect(() => {
     fetchNotes();
@@ -84,7 +96,7 @@ export function MainWorkspace() {
     const url = linkUrl.trim();
     if (!url) return;
     setSaving(true);
-    setLinkMsg("笔记精灵正在识别这条链接...");
+    setLinkMsg("AI 正在识别这条链接...");
     const resp = await fetch("/api/transcribe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -118,7 +130,35 @@ export function MainWorkspace() {
     fetchNotes();
   };
 
+  const handleRestore = async (e: React.MouseEvent, noteId: string) => {
+    e.stopPropagation();
+    await fetch(`/api/notes/${noteId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ restore: true }),
+    });
+    fetchNotes();
+  };
+
+  const handleRetryTranscribe = async (e: React.MouseEvent, noteId: string) => {
+    e.stopPropagation();
+    if (retryingId) return;
+    setRetryingId(noteId);
+    const resp = await fetch("/api/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteId }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      alert(data.error || "重新转录启动失败");
+    }
+    await fetchNotes();
+    setRetryingId(null);
+  };
+
   const grouped = groupByTime(notes);
+  const stats = makeStats(notes);
 
   return (
     <main className="flex min-h-screen flex-1 flex-col bg-[var(--paper-bg)]">
@@ -201,7 +241,7 @@ export function MainWorkspace() {
               </div>
               {linkMsg && <p className="mt-2 pl-1 text-[13px] text-[var(--ink-light)]">{linkMsg}</p>}
               <p className="mt-3 pl-1 text-[13px] text-[var(--ink-faint)]">
-                自动下载 → 转成文字 → 交给笔记精灵整理 → 存进 NoteSprite
+                自动下载 → 转成文字 → 交给 AI 整理 → 存进 NoteSprite
               </p>
             </div>
           )}
@@ -209,23 +249,77 @@ export function MainWorkspace() {
       </div>
 
       <div className="flex-1 overflow-y-auto pb-12">
-        <div className="flex items-center justify-between px-7 py-3">
-          <span className="text-[15px] font-medium text-[var(--ink)]">
-            笔记
-            {!loading && <span className="ml-1 font-normal text-[var(--ink-faint)]">{notes.length}</span>}
-          </span>
-          <div className="flex items-center gap-3">
-            {activeTag && (
-              <button
-                onClick={() => setActiveTag(null)}
-                className="rounded-full bg-[var(--gold-light)] px-3 py-1 text-[13px] text-[var(--gold)]"
-              >
-                #{activeTag} ×
-              </button>
+        <div className="px-7 py-3">
+          <div className="mb-3 grid gap-3 md:grid-cols-4">
+            <StatCard label="全部" value={notes.length} />
+            <StatCard label="有 AI 整理" value={stats.withAI} />
+            <StatCard label="处理中/失败" value={stats.needsAttention} />
+            <StatCard label="标签" value={stats.tags} />
+          </div>
+          <div className="paper-card p-4">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div>
+                <span className="text-[15px] font-medium text-[var(--ink)]">
+                  {view === "trash" ? "最近删除" : "知识库"}
+                  {!loading && <span className="ml-1 font-normal text-[var(--ink-faint)]">{notes.length}</span>}
+                </span>
+                <p className="mt-1 text-xs text-[var(--ink-faint)]">按关键词、来源、状态和 AI 整理情况筛选你的真实笔记。</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button onClick={() => setView("active")} className={pillClass(view === "active")}>全部笔记</button>
+                <button onClick={() => setView("trash")} className={pillClass(view === "trash")}>最近删除</button>
+                <button onClick={fetchNotes} className="rounded-full border border-[var(--paper-border)] px-3 py-1.5 text-xs text-[var(--ink-faint)] hover:text-[var(--ink-light)]">刷新</button>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(220px,1fr)_180px_180px_180px]">
+              <input
+                className="rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none"
+                placeholder="搜索标题、正文、AI 解读、标签"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              <select className="rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)} disabled={view === "trash"}>
+                <option value="all">全部状态</option>
+                <option value="inbox">收集箱</option>
+                <option value="processing">处理中</option>
+                <option value="failed">转录失败</option>
+                <option value="archived">已归档</option>
+              </select>
+              <select className="rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value as any)}>
+                <option value="all">全部来源</option>
+                <option value="manual">手写笔记</option>
+                <option value="douyin">抖音</option>
+                <option value="bilibili">B站</option>
+                <option value="youtube">YouTube</option>
+                <option value="xiaohongshu">小红书</option>
+                <option value="link">普通链接</option>
+              </select>
+              <select className="rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none" value={aiFilter} onChange={(e) => setAiFilter(e.target.value as any)}>
+                <option value="all">AI 整理不限</option>
+                <option value="yes">已有 AI 整理</option>
+                <option value="no">暂无 AI 整理</option>
+              </select>
+            </div>
+
+            {(activeTag || query || statusFilter !== "all" || sourceFilter !== "all" || aiFilter !== "all" || view === "trash") && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {activeTag && <button onClick={() => setActiveTag(null)} className="rounded-full bg-[var(--gold-light)] px-3 py-1 text-[13px] text-[var(--gold)]">#{activeTag} ×</button>}
+                <button
+                  onClick={() => {
+                    setQuery("");
+                    setActiveTag(null);
+                    setStatusFilter("all");
+                    setSourceFilter("all");
+                    setAiFilter("all");
+                    setView("active");
+                  }}
+                  className="rounded-full border border-[var(--paper-border)] px-3 py-1 text-[13px] text-[var(--ink-faint)]"
+                >
+                  清空筛选
+                </button>
+              </div>
             )}
-            <button onClick={fetchNotes} className="text-[var(--ink-faint)] hover:text-[var(--ink-light)]" title="刷新">
-              刷新
-            </button>
           </div>
         </div>
 
@@ -254,6 +348,10 @@ export function MainWorkspace() {
                       onTagClick={(tag) => setActiveTag(tag === activeTag ? null : tag)}
                       onArchive={(e) => handleArchive(e, note.id)}
                       onDelete={(e) => handleDelete(e, note.id)}
+                      onRestore={(e) => handleRestore(e, note.id)}
+                      onRetryTranscribe={(e) => handleRetryTranscribe(e, note.id)}
+                      retrying={retryingId === note.id}
+                      inTrash={view === "trash"}
                     />
                   ))}
                 </div>
@@ -271,14 +369,23 @@ function NoteCard({
   onTagClick,
   onArchive,
   onDelete,
+  onRestore,
+  onRetryTranscribe,
+  retrying,
+  inTrash,
 }: {
   note: Note;
   onTagClick: (tag: string) => void;
   onArchive: (e: React.MouseEvent) => void;
   onDelete: (e: React.MouseEvent) => void;
+  onRestore: (e: React.MouseEvent) => void;
+  onRetryTranscribe: (e: React.MouseEvent) => void;
+  retrying: boolean;
+  inTrash: boolean;
 }) {
   const router = useRouter();
   const isProcessing = note.status === "processing";
+  const isTranscribeFailed = (note.status === "failed" || note.contentMd.includes("[失败]")) && Boolean(note.sourceUrl);
   const cleanContent = stripMarkdown(note.contentMd);
   const title = note.title || cleanContent.slice(0, 120);
   const summary = note.aiResult?.summary || "";
@@ -297,7 +404,7 @@ function NoteCard({
         <div>
           <div className="mb-1.5 flex items-center gap-2">
             <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[var(--gold)] border-t-transparent" />
-            <span className="text-sm font-medium text-[var(--gold)]">笔记精灵正在整理这页...</span>
+            <span className="text-sm font-medium text-[var(--gold)]">AI 正在整理这页...</span>
           </div>
           <p className="text-sm text-[var(--ink-faint)]">{note.contentMd.slice(0, 80)}</p>
         </div>
@@ -314,6 +421,8 @@ function NoteCard({
               </span>
             )}
             {summary && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-600">AI 整理</span>}
+            {note.status === "failed" && <span className="rounded-full bg-red-50 px-2 py-0.5 text-xs text-red-500">转录失败</span>}
+            {note.status === "archived" && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">已归档</span>}
             <span className="ml-auto text-xs text-[var(--ink-faint)]">{formatTime(note.createdAt)}</span>
           </div>
 
@@ -364,6 +473,15 @@ function NoteCard({
               ))}
 
             <div className="ml-auto flex items-center gap-0.5">
+              {isTranscribeFailed && (
+                <button
+                  onClick={(e) => onRetryTranscribe(e as any)}
+                  disabled={retrying}
+                  className="rounded px-2 py-1 text-xs text-blue-600 transition-colors hover:bg-blue-50 disabled:opacity-40"
+                >
+                  {retrying ? "重试中" : "重新转录"}
+                </button>
+              )}
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -373,7 +491,14 @@ function NoteCard({
               >
                 打开
               </button>
-              {note.status === "inbox" && (
+              {inTrash ? (
+                <button
+                  onClick={(e) => onRestore(e as any)}
+                  className="rounded px-2 py-1 text-xs text-blue-600 transition-colors hover:bg-blue-50"
+                >
+                  恢复
+                </button>
+              ) : note.status === "inbox" && (
                 <button
                   onClick={(e) => onArchive(e as any)}
                   className="rounded px-2 py-1 text-xs text-[var(--ink-faint)] transition-colors hover:bg-[var(--sage-light)] hover:text-[var(--sage)]"
@@ -381,12 +506,14 @@ function NoteCard({
                   归档
                 </button>
               )}
-              <button
-                onClick={(e) => onDelete(e as any)}
-                className="rounded px-2 py-1 text-xs text-[var(--ink-faint)] transition-colors hover:bg-red-50 hover:text-red-400"
-              >
-                删除
-              </button>
+              {!inTrash && (
+                <button
+                  onClick={(e) => onDelete(e as any)}
+                  className="rounded px-2 py-1 text-xs text-[var(--ink-faint)] transition-colors hover:bg-red-50 hover:text-red-400"
+                >
+                  删除
+                </button>
+              )}
             </div>
           </div>
         </>
@@ -407,13 +534,40 @@ function platformBadge(type: string): string {
   return labels[type] || type;
 }
 
+function pillClass(active: boolean) {
+  return `rounded-full px-3 py-1.5 text-xs transition-colors ${
+    active ? "bg-[var(--ink)] text-white" : "border border-[var(--paper-border)] text-[var(--ink-faint)] hover:text-[var(--ink-light)]"
+  }`;
+}
+
+function StatCard({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-[8px] border border-[var(--paper-border)] bg-white px-4 py-3">
+      <div className="text-xs text-[var(--ink-faint)]">{label}</div>
+      <div className="mt-1 text-xl font-semibold text-[var(--ink)]">{value}</div>
+    </div>
+  );
+}
+
+function makeStats(notes: Note[]) {
+  const tags = new Set<string>();
+  let withAI = 0;
+  let needsAttention = 0;
+  for (const note of notes) {
+    if (note.aiResult) withAI += 1;
+    if (note.status === "processing" || note.status === "failed") needsAttention += 1;
+    for (const nt of note.tags || []) tags.add(nt.tag.fullPath);
+  }
+  return { withAI, needsAttention, tags: tags.size };
+}
+
 function pickPlaceholder(): string {
   const placeholders = [
     "把一闪而过的念头放在这里。",
     "一句话，也可以长成一页。",
     "落笔就是整理，不用急。",
     "今天有什么值得被记住？",
-    "贴一条链接，笔记精灵会帮你收好。",
+    "贴一条链接，AI 会帮你收好。",
   ];
   return placeholders[new Date().getHours() % placeholders.length];
 }

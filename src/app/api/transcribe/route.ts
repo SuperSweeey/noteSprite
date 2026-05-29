@@ -5,34 +5,75 @@ import { parseTags, stripMarkdown } from "@/lib/tags";
 import { analyzeNote } from "@/lib/ai";
 import { getAIConfig, getTranscriptionConfig, buildTranscriptionEnv } from "@/lib/ai-config";
 import { transcribeUrl, detectPlatform, extractUrl } from "@/lib/transcribe";
+import { runTranscriptionPreflight } from "@/lib/transcription-preflight";
 
 export async function POST(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
-    const { url: rawInput } = await req.json();
+    const { url: rawInput, noteId } = await req.json();
 
-    if (!rawInput || typeof rawInput !== "string") {
+    let sourceNote:
+      | { id: string; title: string; sourceUrl: string | null; contentMd: string }
+      | null = null;
+    if (noteId) {
+      sourceNote = await prisma.note.findFirst({
+        where: { id: noteId, userId, deletedAt: null },
+        select: { id: true, title: true, sourceUrl: true, contentMd: true },
+      });
+      if (!sourceNote) {
+        return NextResponse.json({ error: "找不到要重新转录的笔记" }, { status: 404 });
+      }
+    }
+
+    const retryUrl = sourceNote?.sourceUrl || extractUrl(sourceNote?.contentMd || "").url;
+    const input = typeof rawInput === "string" && rawInput.trim() ? rawInput : retryUrl;
+    if (!input || typeof input !== "string") {
       return NextResponse.json({ error: "URL is required" }, { status: 400 });
     }
 
-    // Extract clean URL and optional title from share text
-    const { url: cleanUrl, title: extractedTitle } = extractUrl(rawInput);
-    const platform = detectPlatform(rawInput); // detect from raw input (contains domain hints)
+    const { url: cleanUrl, title: extractedTitle } = extractUrl(input);
+    const platform = detectPlatform(input);
 
-    const note = await prisma.note.create({
-      data: {
-        userId,
-        title: extractedTitle || "",
-        contentMd: cleanUrl,
-        plainText: cleanUrl,
-        type: "link",
-        sourceUrl: cleanUrl,
-        status: platform ? "processing" : "inbox",
-      },
-      include: { tags: { include: { tag: true } } },
-    });
+    const note = sourceNote
+      ? await prisma.note.update({
+          where: { id: sourceNote.id },
+          data: {
+            title: sourceNote.title || extractedTitle || "",
+            contentMd: cleanUrl,
+            plainText: cleanUrl,
+            type: "link",
+            sourceUrl: cleanUrl,
+            status: platform ? "processing" : "inbox",
+          },
+          include: { tags: { include: { tag: true } } },
+        })
+      : await prisma.note.create({
+          data: {
+            userId,
+            title: extractedTitle || "",
+            contentMd: cleanUrl,
+            plainText: cleanUrl,
+            type: "link",
+            sourceUrl: cleanUrl,
+            status: platform ? "processing" : "inbox",
+          },
+          include: { tags: { include: { tag: true } } },
+        });
+
+    if (sourceNote) {
+      await prisma.aIResult.deleteMany({ where: { noteId: sourceNote.id } });
+    }
 
     if (platform) {
+      const preflight = await runTranscriptionPreflight(userId);
+      if (!preflight.ok) {
+        const error = preflight.checks
+          .filter((check) => !check.ok)
+          .map((check) => `${check.name}：${check.message}`)
+          .join("\n");
+        await markFailed(note.id, cleanUrl, platform, `转录预检失败\n${error}`);
+        return NextResponse.json({ note, platform, preflight, message: "转录预检失败，已写入笔记状态" });
+      }
       runTranscription(note.id, cleanUrl, userId, platform);
     }
 
@@ -49,25 +90,21 @@ export async function POST(req: NextRequest) {
   }
 }
 
-async function runTranscription(
-  noteId: string, url: string, userId: string, platform: string
-) {
-  // Read user settings for AI analysis + transcription pipeline
+async function runTranscription(noteId: string, url: string, userId: string, platform: string) {
   const analysisConfig = await getAIConfig(userId, "analysis");
   const transcriptionConfig = await getTranscriptionConfig(userId);
   const extraEnv = buildTranscriptionEnv(transcriptionConfig);
 
-  // Update note to show processing state
   await prisma.note.update({
     where: { id: noteId },
     data: {
       contentMd: `> [处理中] 正在下载并转写 ${platform} 视频...\n\n${url}`,
       plainText: `[处理中] 正在转写 ${platform} 视频...`,
+      status: "processing",
     },
   });
 
   try {
-    console.log(`[Transcribe] Starting for note ${noteId}, platform: ${platform}`);
     const result = await transcribeUrl(url, platform, extraEnv);
 
     if (result.success && result.text) {
@@ -83,15 +120,13 @@ async function runTranscription(
         return;
       }
 
-      // One AI call: title + keywords + suggestedTags
       const analysisOverrides = {
         apiKey: analysisConfig.apiKey || undefined,
         baseUrl: analysisConfig.baseUrl || undefined,
         model: analysisConfig.model || undefined,
       };
       const analysis = await analyzeNote(cleanText, analysisOverrides).catch(() => null);
-      // Fallback: first non-empty line of transcription, up to 20 chars
-      const fallbackTitle = cleanText.split("\n").find((l) => l.trim().length > 2)?.trim().slice(0, 20) || "";
+      const fallbackTitle = cleanText.split("\n").find((line) => line.trim().length > 2)?.trim().slice(0, 20) || "";
       const shortTitle = analysis?.title || fallbackTitle || `${platform} 转写`;
       const fullContent = `# ${shortTitle}\n\n**来源：** ${url}\n**平台：** ${platform}\n\n---\n\n${cleanText}`;
 
@@ -109,13 +144,13 @@ async function runTranscription(
           contentMd: fullContent,
           plainText: stripMarkdown(fullContent),
           type: platform as any,
+          sourceUrl: url,
           status: "inbox",
         },
       });
 
-      // Reconnect tags
       await prisma.noteTag.deleteMany({ where: { noteId } });
-      for (const tagId of tagIds) {
+      for (const tagId of Array.from(new Set(tagIds))) {
         await prisma.noteTag.create({ data: { noteId, tagId } });
         await prisma.tag.update({
           where: { id: tagId },
@@ -123,7 +158,6 @@ async function runTranscription(
         });
       }
 
-      // Save AI result (keywords + suggestedTags; title already used above)
       if (analysis) {
         await prisma.aIResult.create({
           data: {
@@ -136,29 +170,28 @@ async function runTranscription(
           },
         }).catch((e) => console.error(`[AI] Save AIResult failed for note ${noteId}:`, e));
       }
-
-      console.log(`[Transcribe] Done: note ${noteId} (${cleanText.length} chars)`);
     } else {
       await markFailed(noteId, url, platform, result.error || "转录失败");
     }
   } catch (e: any) {
-    console.error(`[Transcribe] Failed for note ${noteId}:`, e);
     let errMsg = e.message || "转录失败";
-    // Add cookies hint for douyin CAPTURE_FAILED
     if (platform === "douyin" && errMsg.includes("CAPTURE_FAILED")) {
-      errMsg += "\n\n💡 抖音需要 cookies 才能下载。请在 python/ 目录下放置 cookies.txt 文件（Netscape 格式）。可从浏览器导出。";
+      errMsg += "\n\n提示：抖音可能需要有效 cookies。请在设置页更新 cookies 后再试。";
     }
     await markFailed(noteId, url, platform, errMsg);
   }
 }
 
 async function markFailed(noteId: string, url: string, platform: string, error: string) {
+  await prisma.aIResult.deleteMany({ where: { noteId } });
   await prisma.note.update({
     where: { id: noteId },
     data: {
-      contentMd: `> [失败] ${platform} 视频转写失败\n> ${error}\n\n${url}`,
+      contentMd: `> [失败] ${platform} 视频转写失败\n> ${error.replace(/\n/g, "\n> ")}\n\n${url}`,
       plainText: `[失败] ${error}`,
-      status: "inbox",
+      type: platform as any,
+      sourceUrl: url,
+      status: "failed",
     },
   });
 }

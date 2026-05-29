@@ -34,17 +34,48 @@ export interface TranscribeResult {
   transcriptFile?: string;
 }
 
-/** Extract a clean URL from pasted share text (e.g. douyin/bilibili share messages) */
+function parseFailureOutput(stdout = "", stderr = ""): Partial<TranscribeResult> & { stage?: string } | null {
+  const text = `${stdout}\n${stderr}`;
+  const candidates = text.match(/\{[\s\S]*?"task_status"\s*:\s*"failed"[\s\S]*?\}/g);
+  if (!candidates?.length) return null;
+
+  for (const candidate of candidates.reverse()) {
+    try {
+      const parsed = JSON.parse(candidate);
+      return {
+        taskId: parsed.task_id || "",
+        platform: parsed.platform,
+        url: parsed.url,
+        error: parsed.error,
+        stage: parsed.stage,
+      };
+    } catch {}
+  }
+  return null;
+}
+
+function formatPipelineError(error: string, stage?: string): string {
+  const prefix = stage ? `阶段：${stage}\n` : "";
+  if (error.includes("ffmpeg")) {
+    return `${prefix}${error}\n\n建议：在设置页填写 ffmpeg.exe 的完整路径，或清空错误路径让系统自动使用 PATH 中的 ffmpeg。`;
+  }
+  if (error.includes("InvalidApiKey") || error.includes("Invalid API-key")) {
+    return `${prefix}${error}\n\n建议：检查转录设置里的 DashScope API Key。这里要填阿里云百炼/DashScope 的模型 API Key，不是 OSS AccessKey ID，也不是 OSS AccessKey Secret。`;
+  }
+  if (error.includes("AccessDenied") || error.includes("OSS") || error.includes("403")) {
+    return `${prefix}${error}\n\n建议：检查 OSS 的 AccessKey、Bucket、Endpoint 是否匹配，以及该 AccessKey 是否有 PutObject/GetObject/DeleteObject 权限。`;
+  }
+  if (error.includes("cookies") || error.includes("登录")) {
+    return `${prefix}${error}\n\n建议：更新平台 cookies 后再试。`;
+  }
+  return `${prefix}${error}`;
+}
+
 export function extractUrl(text: string): { url: string; title?: string } {
-  // Try to find a URL in the text
   const urlMatch = text.match(/https?:\/\/[^\s]+/);
   const cleanUrl = urlMatch ? urlMatch[0].replace(/[。，！？、…]+$/, "") : text.trim();
-
-  // Try to extract a title from share text like 【标题】 or 《标题》
   const titleMatch = text.match(/【(.+?)】/) || text.match(/《(.+?)》/);
-  const title = titleMatch ? titleMatch[1] : undefined;
-
-  return { url: cleanUrl, title };
+  return { url: cleanUrl, title: titleMatch?.[1] };
 }
 
 export function detectPlatform(url: string): string | null {
@@ -61,10 +92,9 @@ export async function transcribeUrl(
 ): Promise<TranscribeResult> {
   const detected = platform || detectPlatform(url);
   if (!detected) {
-    return { success: false, taskId: "", error: `不支持的链接类型，目前支持：抖音、B站、YouTube、小红书` };
+    return { success: false, taskId: "", error: "不支持的链接类型，目前支持：抖音、B站、YouTube、小红书" };
   }
 
-  // Write cookies to temp file if provided
   let cookiesPath = "";
   if (extraEnv?.COOKIES) {
     const { writeFile } = await import("fs/promises");
@@ -76,8 +106,6 @@ export async function transcribeUrl(
 
   try {
     const cmd = `python "${MAIN_PY}" --platform ${detected} --url "${url}"${cookiesPath ? ` --cookies "${cookiesPath}"` : ""}`;
-    console.log(`[Transcribe] Running: ${cmd}`);
-
     const env = { ...process.env, ...extraEnv };
     if (cookiesPath) env.COOKIES_PATH = cookiesPath;
 
@@ -87,53 +115,33 @@ export async function transcribeUrl(
       env,
     });
 
-    console.log("[Transcribe] stdout:", stdout.slice(0, 300));
-    if (stderr) console.log("[Transcribe] stderr:", stderr.slice(0, 300));
-
-    // Parse task ID from output
     const taskIdMatch =
       stdout.match(/\[([a-f0-9]{8})\]/) ||
       stderr.match(/\[([a-f0-9]{8})\]/) ||
       stdout.match(/task_id.*?([a-f0-9]{8})/) ||
       stderr.match(/task_id.*?([a-f0-9]{8})/);
-
     const taskId = taskIdMatch ? taskIdMatch[1] : "";
 
-    // Read the transcript file
     if (taskId) {
       const transcriptPath = join(OUTPUT_DIR, `transcript_${taskId}.txt`);
       try {
         const text = await readFile(transcriptPath, "utf-8");
-        return {
-          success: true,
-          taskId,
-          text,
-          platform: detected,
-          url,
-          transcriptFile: transcriptPath,
-        };
+        return { success: true, taskId, text, platform: detected, url, transcriptFile: transcriptPath };
       } catch {
-        // Try to extract transcript from stdout
         const previewMatch = stdout.match(/转录预览[\s\S]*?\n([\s\S]*?)\n\n/);
         if (previewMatch) {
-          return {
-            success: true,
-            taskId,
-            text: previewMatch[1].trim(),
-            platform: detected,
-            url,
-          };
+          return { success: true, taskId, text: previewMatch[1].trim(), platform: detected, url };
         }
       }
     }
 
     return { success: true, taskId, text: stdout, platform: detected, url };
   } catch (e: any) {
-    console.error("[Transcribe] Error:", e.message);
-    // Check if there's partial output
     const stdout = e.stdout || "";
-    const taskIdMatch = stdout.match(/\[([a-f0-9]{8})\]/);
-    const taskId = taskIdMatch ? taskIdMatch[1] : "";
+    const stderr = e.stderr || "";
+    const failure = parseFailureOutput(stdout, stderr);
+    const taskIdMatch = stdout.match(/\[([a-f0-9]{8})\]/) || stderr.match(/\[([a-f0-9]{8})\]/);
+    const taskId = failure?.taskId || (taskIdMatch ? taskIdMatch[1] : "");
 
     if (taskId) {
       const transcriptPath = join(OUTPUT_DIR, `transcript_${taskId}.txt`);
@@ -146,12 +154,11 @@ export async function transcribeUrl(
     return {
       success: false,
       taskId,
-      error: e.message.slice(0, 500),
-      platform: detected,
-      url,
+      error: formatPipelineError(failure?.error || e.message.slice(0, 500), failure?.stage),
+      platform: failure?.platform || detected,
+      url: failure?.url || url,
     };
   } finally {
-    // Clean up temp cookies file
     if (cookiesPath) {
       const { unlink } = await import("fs/promises");
       await unlink(cookiesPath).catch(() => {});

@@ -1,30 +1,44 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { UserSettings, Provider, DEFAULTS, TranscriptionSettings } from "@/lib/ai-config";
+import {
+  DEFAULTS,
+  Provider,
+  SECRET_MASK,
+  UserSettings,
+  isMaskedSecret,
+  resolveSettings,
+} from "@/lib/ai-config";
+
+function mask(value?: string | null): string {
+  const text = String(value || "");
+  return text ? `${SECRET_MASK}${text.slice(-4)}` : "";
+}
+
+function keepSecret(incoming?: string, existing?: string): string {
+  const value = String(incoming || "").trim();
+  if (!value || isMaskedSecret(value)) return existing || "";
+  return value;
+}
 
 export async function GET() {
   try {
     const userId = await getCurrentUserId();
     const user = await prisma.user.findUnique({ where: { id: userId } });
-    let settings: UserSettings;
-    try { settings = JSON.parse(user?.settings || "{}"); } catch { settings = DEFAULTS; }
-    const resolved = resolve(settings);
+    const resolved = resolveSettings(user?.settings);
 
-    // Mask API keys for display
-    const masked = {
+    return NextResponse.json({
       ...resolved,
-      providers: resolved.providers.map((p) => ({
-        ...p,
-        apiKey: p.apiKey ? "••••" + p.apiKey.slice(-4) : "",
+      providers: resolved.providers.map((provider) => ({
+        ...provider,
+        apiKey: mask(provider.apiKey),
       })),
       transcription: {
         ...resolved.transcription,
-        dashscopeApiKey: resolved.transcription.dashscopeApiKey ? "••••" + resolved.transcription.dashscopeApiKey.slice(-4) : "",
-        ossAccessKeySecret: resolved.transcription.ossAccessKeySecret ? "••••" + resolved.transcription.ossAccessKeySecret.slice(-4) : "",
+        dashscopeApiKey: mask(resolved.transcription.dashscopeApiKey),
+        ossAccessKeySecret: mask(resolved.transcription.ossAccessKeySecret),
       },
-    };
-    return NextResponse.json(masked);
+    });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
@@ -35,22 +49,26 @@ export async function PUT(req: NextRequest) {
     const userId = await getCurrentUserId();
     const body = await req.json();
     const user = await prisma.user.findUnique({ where: { id: userId } });
-    let existing: UserSettings;
-    try { existing = JSON.parse(user?.settings || "{}"); } catch { existing = DEFAULTS; }
+    const existing = resolveSettings(user?.settings);
 
     const updated: UserSettings = {
-      providers: existing.providers || DEFAULTS.providers,
+      providers: existing.providers,
       assignments: { ...DEFAULTS.assignments, ...existing.assignments },
-      prompts: { ...existing.prompts },
+      prompts: { ...DEFAULTS.prompts, ...existing.prompts },
       transcription: { ...DEFAULTS.transcription, ...existing.transcription },
+      spirit: { ...DEFAULTS.spirit, ...existing.spirit },
     };
 
     if (body.providers) {
-      updated.providers = body.providers.map((p: any) => ({
-        ...p,
-        apiKey: (p.apiKey && !p.apiKey.startsWith("••••")) ? p.apiKey : (existing.providers?.find((ep: Provider) => ep.id === p.id)?.apiKey || ""),
-      }));
+      updated.providers = body.providers.map((provider: Provider) => {
+        const oldProvider = existing.providers.find((item) => item.id === provider.id);
+        return {
+          ...provider,
+          apiKey: keepSecret(provider.apiKey, oldProvider?.apiKey),
+        };
+      });
     }
+
     if (body.assignments) {
       updated.assignments = { ...updated.assignments, ...body.assignments };
     }
@@ -58,15 +76,26 @@ export async function PUT(req: NextRequest) {
       updated.prompts = { ...updated.prompts, ...body.prompts };
     }
     if (body.transcription) {
-      const t = body.transcription;
+      const current = existing.transcription;
+      const incoming = body.transcription;
       updated.transcription = {
-        cookies: t.cookies ?? existing.transcription?.cookies ?? "",
-        dashscopeApiKey: (t.dashscopeApiKey && !t.dashscopeApiKey.startsWith("••••")) ? t.dashscopeApiKey : (existing.transcription?.dashscopeApiKey || ""),
-        ossAccessKeyId: t.ossAccessKeyId ?? existing.transcription?.ossAccessKeyId ?? "",
-        ossAccessKeySecret: (t.ossAccessKeySecret && !t.ossAccessKeySecret.startsWith("••••")) ? t.ossAccessKeySecret : (existing.transcription?.ossAccessKeySecret || ""),
-        ossBucketName: t.ossBucketName ?? existing.transcription?.ossBucketName ?? "",
-        ossEndpoint: t.ossEndpoint ?? existing.transcription?.ossEndpoint ?? "",
-        ffmpegPath: t.ffmpegPath ?? existing.transcription?.ffmpegPath ?? "",
+        cookies: incoming.cookies ?? current.cookies ?? "",
+        dashscopeApiKey: keepSecret(incoming.dashscopeApiKey, current.dashscopeApiKey),
+        ossAccessKeyId: incoming.ossAccessKeyId ?? current.ossAccessKeyId ?? "",
+        ossAccessKeySecret: keepSecret(incoming.ossAccessKeySecret, current.ossAccessKeySecret),
+        ossBucketName: incoming.ossBucketName ?? current.ossBucketName ?? "",
+        ossEndpoint: incoming.ossEndpoint ?? current.ossEndpoint ?? "",
+        ffmpegPath: incoming.ffmpegPath ?? current.ffmpegPath ?? "",
+      };
+    }
+    if (body.spirit) {
+      updated.spirit = {
+        name: body.spirit.name ?? existing.spirit.name,
+        personaId: body.spirit.personaId ?? existing.spirit.personaId,
+        personaPrompt: body.spirit.personaPrompt ?? existing.spirit.personaPrompt,
+        learningModeId: body.spirit.learningModeId ?? existing.spirit.learningModeId,
+        learningPrompt: body.spirit.learningPrompt ?? existing.spirit.learningPrompt,
+        prompt: body.spirit.prompt ?? existing.spirit.prompt,
       };
     }
 
@@ -79,30 +108,4 @@ export async function PUT(req: NextRequest) {
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
-}
-
-function resolve(settings: UserSettings): UserSettings {
-  if (!settings?.providers?.length) return DEFAULTS;
-  return {
-    providers: settings.providers,
-    assignments: {
-      chat: settings.assignments?.chat || DEFAULTS.assignments.chat,
-      analysis: settings.assignments?.analysis || DEFAULTS.assignments.analysis,
-      report: settings.assignments?.report || DEFAULTS.assignments.report,
-    },
-    prompts: {
-      chat: settings.prompts?.chat || "",
-      analysis: settings.prompts?.analysis || "",
-      report: settings.prompts?.report || "",
-    },
-    transcription: {
-      cookies: settings.transcription?.cookies || "",
-      dashscopeApiKey: settings.transcription?.dashscopeApiKey || "",
-      ossAccessKeyId: settings.transcription?.ossAccessKeyId || "",
-      ossAccessKeySecret: settings.transcription?.ossAccessKeySecret || "",
-      ossBucketName: settings.transcription?.ossBucketName || "",
-      ossEndpoint: settings.transcription?.ossEndpoint || "",
-      ffmpegPath: settings.transcription?.ffmpegPath || "",
-    },
-  };
 }

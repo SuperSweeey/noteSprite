@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Noteflow",
-  description: "个人 AI 知识管理系统",
+  title: "NoteSprite",
+  description: "有精灵的真实笔记~",
 };
 
 export default function RootLayout({
