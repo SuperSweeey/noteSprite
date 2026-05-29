@@ -9,7 +9,7 @@ export function parseTags(text: string): string[] {
 
   // Remove the # prefix and deduplicate
   const paths = matches.map((t) => t.slice(1));
-  return [...new Set(paths)].sort();
+  return Array.from(new Set(paths)).sort();
 }
 
 /**

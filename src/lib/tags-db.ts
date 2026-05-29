@@ -12,7 +12,10 @@ export async function ensureTagHierarchy(userId: string, fullPath: string): Prom
     if (existing) {
       parentId = existing.id;
     } else {
-      const created = await prisma.tag.create({ data: { userId, name: parts[i], fullPath: currentPath, parentId } });
+      const created: { id: string } = await prisma.tag.create({
+        data: { userId, name: parts[i], fullPath: currentPath, parentId },
+        select: { id: true },
+      });
       parentId = created.id;
     }
     allIds.push(parentId);

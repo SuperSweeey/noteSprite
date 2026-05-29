@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
       const ids = await ensureTagHierarchy(userId, fullPath);
       allTagIds.push(...ids);
     }
-    const uniqueTagIds = [...new Set(allTagIds)];
+    const uniqueTagIds = Array.from(new Set(allTagIds));
 
     // Step 2: create the note with tag connections
     const note = await prisma.note.create({
@@ -119,8 +119,8 @@ async function runAIAnalysis(noteId: string, content: string) {
       data: {
         noteId,
         model: config.model || "deepseek-v4-flash",
-        summary: result.title,
-        keyPoints: JSON.stringify(result.keywords),
+        summary: result.summary,
+        keyPoints: JSON.stringify(result.keyPoints),
         keywords: JSON.stringify(result.keywords),
         suggestedTags: JSON.stringify(result.suggestedTags),
       },

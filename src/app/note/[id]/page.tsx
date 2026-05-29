@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { SpiritPanel } from "@/components/SpiritPanel";
@@ -8,187 +8,572 @@ import { MarkdownView } from "@/components/MarkdownView";
 
 type Tab = "spirit" | "content" | "source" | "append";
 
+function safeParse(value?: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function NoteDetailPage() {
-  const params = useParams(); const router = useRouter();
-  const [note, setNote] = useState<any>(null); const [loading, setLoading] = useState(true);
+  const params = useParams();
+  const router = useRouter();
+  const [note, setNote] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>("spirit");
-  const [report, setReport] = useState(""); const [reportLoading, setReportLoading] = useState(false);
-  const [editingReport, setEditingReport] = useState(false); const [editReport, setEditReport] = useState("");
-  const [editingContent, setEditingContent] = useState(false); const [editContent, setEditContent] = useState("");
-  const [editingTitle, setEditingTitle] = useState(false); const [editTitle, setEditTitle] = useState("");
-  const [appendText, setAppendText] = useState(""); const [appending, setAppending] = useState(false);
-  const [allTags, setAllTags] = useState<{ id: string; fullPath: string; noteCount: number }[]>([]);
-  const [showTagInput, setShowTagInput] = useState(false); const [addTagText, setAddTagText] = useState("");
+  const [report, setReport] = useState("");
+  const [reportLoading, setReportLoading] = useState(false);
+  const [editingReport, setEditingReport] = useState(false);
+  const [editReport, setEditReport] = useState("");
+  const [editingContent, setEditingContent] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [appendText, setAppendText] = useState("");
+  const [appending, setAppending] = useState(false);
+  const [showTagInput, setShowTagInput] = useState(false);
+  const [addTagText, setAddTagText] = useState("");
 
   const fetchNote = () => {
-    fetch("/api/notes?limit=300").then((r) => r.json()).then((data) => {
-      const found = data.notes?.find((n: any) => n.id === params.id);
-      setNote(found || null); setEditContent(found?.contentMd || ""); setEditTitle(found?.aiResult?.summary || "");
-      setLoading(false);
-    });
+    fetch("/api/notes?limit=300")
+      .then((r) => r.json())
+      .then((data) => {
+        const found = data.notes?.find((n: any) => n.id === params.id);
+        setNote(found || null);
+        setEditContent(found?.contentMd || "");
+        setEditTitle(found?.title || found?.aiResult?.title || found?.contentMd?.slice(0, 80) || "");
+        setLoading(false);
+      });
   };
-  useEffect(() => { fetchNote(); }, [params.id]);
 
-  useEffect(() => { fetch("/api/tags").then(r=>r.json()).then(d=>setAllTags(d.tags||[])); }, []);
+  useEffect(() => {
+    fetchNote();
+  }, [params.id]);
 
-  const isAutoNote = note?.type && note.type !== "manual";
-  const title = note?.aiResult?.summary || note?.contentMd?.slice(0, 100) || "";
+  const title = note?.title || note?.aiResult?.title || note?.contentMd?.slice(0, 100) || "";
+  const summary = note?.aiResult?.summary || "";
+  const keyPoints = useMemo(() => safeParse(note?.aiResult?.keyPoints), [note?.aiResult?.keyPoints]);
+  const keywords = useMemo(() => safeParse(note?.aiResult?.keywords), [note?.aiResult?.keywords]);
+  const suggestedTags = useMemo(() => safeParse(note?.aiResult?.suggestedTags), [note?.aiResult?.suggestedTags]);
+  const spiritQuestions = useMemo(() => safeParse(note?.aiResult?.reviewQuestions), [note?.aiResult?.reviewQuestions]);
+  const hasSource = Boolean(note?.sourceUrl && note?.type !== "manual");
 
-  // Load cached report or generate new one
   useEffect(() => {
     if (!note?.id) return;
-    // Check cache in AIResult
-    if (note.aiResult?.summary && note.aiResult.summary.includes("## ")) {
-      setReport(note.aiResult.summary);
+    if (note.aiResult?.actionItems && note.aiResult.actionItems.includes("## ")) {
+      setReport(note.aiResult.actionItems);
       return;
     }
-    if (!isAutoNote) return;
-    // Generate new report
+
     setReportLoading(true);
-    fetch("/api/ai/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ noteId: note.id, model: localStorage.getItem("nf_model") || undefined, apiKey: localStorage.getItem("nf_api_key") || undefined, baseUrl: localStorage.getItem("nf_base_url") || undefined }) })
-      .then((r) => r.json()).then((d) => { if (d.report) { setReport(d.report); fetchNote(); } setReportLoading(false); })
+    fetch("/api/ai/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        noteId: note.id,
+        model: localStorage.getItem("nf_model") || undefined,
+        apiKey: localStorage.getItem("nf_api_key") || undefined,
+        baseUrl: localStorage.getItem("nf_base_url") || undefined,
+      }),
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.report) {
+          setReport(d.report);
+          fetchNote();
+        }
+        setReportLoading(false);
+      })
       .catch(() => setReportLoading(false));
   }, [note?.id]);
 
   const handleSaveContent = async () => {
-    const resp = await fetch(`/api/notes/${note.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: editContent }) });
-    if (resp.ok) { const u = await resp.json(); setNote(u); setEditingContent(false); }
+    const resp = await fetch(`/api/notes/${note.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: editContent }),
+    });
+    if (resp.ok) {
+      const updated = await resp.json();
+      setNote(updated);
+      setEditingContent(false);
+    }
   };
+
   const handleSaveTitle = async () => {
-    // Save title to AIResult
-    await fetch(`/api/notes/${note.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: editTitle }) });
-    setEditingTitle(false); fetchNote();
+    const resp = await fetch(`/api/notes/${note.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: editTitle }),
+    });
+    if (resp.ok) {
+      fetchNote();
+      setEditingTitle(false);
+    }
   };
+
   const handleSaveReport = async () => {
-    await fetch("/api/ai/report", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ noteId: note.id, report: editReport }) });
-    setReport(editReport); setEditingReport(false);
+    await fetch("/api/ai/report", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteId: note.id, report: editReport }),
+    });
+    setReport(editReport);
+    setEditingReport(false);
+    fetchNote();
   };
+
   const handleAppend = async () => {
-    if (!appendText.trim()) return; setAppending(true);
-    const resp = await fetch(`/api/notes/${note.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: note.contentMd + "\n\n---\n\n" + appendText }) });
-    if (resp.ok) { const u = await resp.json(); setNote(u); setAppendText(""); setTab("content"); }
+    if (!appendText.trim()) return;
+    setAppending(true);
+    const resp = await fetch(`/api/notes/${note.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: `${note.contentMd}\n\n---\n\n${appendText}` }),
+    });
+    if (resp.ok) {
+      const updated = await resp.json();
+      setNote(updated);
+      setAppendText("");
+      setTab("content");
+    }
     setAppending(false);
   };
-  const handleDeleteTag = async (tagId: string) => {
-    await fetch(`/api/tags?id=${tagId}`, { method: "DELETE" });
-    fetchNote(); fetch("/api/tags").then(r=>r.json()).then(d=>setAllTags(d.tags||[]));
-  };
+
   const handleAddTag = async () => {
     const tagPath = addTagText.trim();
     if (!tagPath) return;
-    // Append #tag to note content, which triggers re-parsing in PATCH
-    const newContent = (note.contentMd || "") + `\n#${tagPath}`;
-    const resp = await fetch(`/api/notes/${note.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: newContent }) });
-    if (resp.ok) { const u = await resp.json(); setNote(u); setAddTagText(""); setShowTagInput(false); }
+    const resp = await fetch(`/api/notes/${note.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: `${note.contentMd}\n#${tagPath}` }),
+    });
+    if (resp.ok) {
+      setAddTagText("");
+      setShowTagInput(false);
+      fetchNote();
+    }
   };
+
+  const handleDeleteTag = async (tagId: string) => {
+    await fetch(`/api/tags?id=${tagId}`, { method: "DELETE" });
+    fetchNote();
+  };
+
   const handleDelete = async () => {
-    if (!confirm("确定撕掉这页？")) return;
-    await fetch(`/api/notes/${note.id}`, { method: "DELETE" }); router.push("/");
+    if (!confirm("确定把这页放进最近删除吗？")) return;
+    await fetch(`/api/notes/${note.id}`, { method: "DELETE" });
+    router.push("/");
   };
 
-  const updateTime = formatRelative(note?.updatedAt || note?.createdAt);
-  const wordCount = note?.contentMd?.replace(/[#*`~>\[\]()!|\-\n\s]/g, "")?.length || 0;
-  const hasSource = note?.sourceUrl && note?.type !== "manual";
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[var(--paper-bg)]">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--paper-border)] border-t-[var(--gold)]" />
+      </div>
+    );
+  }
 
-  if (loading) return <div className="flex h-screen bg-[var(--paper-bg)] items-center justify-center"><div className="w-5 h-5 border-2 border-[var(--paper-border)] border-t-[var(--gold)] rounded-full animate-spin" /></div>;
-  if (!note) return (
-    <div className="flex h-screen overflow-hidden"><Sidebar /><main className="flex-1 bg-[var(--paper-bg)] flex flex-col items-center justify-center gap-2"><p className="text-lg text-[var(--ink-light)] font-prose">这页笔记不知去向了</p><button onClick={() => router.push("/")} className="text-sm text-[var(--gold)] hover:underline">回书桌</button></main><SpiritPanel /></div>
-  );
+  if (!note) {
+    return (
+      <div className="flex h-screen overflow-hidden">
+        <Sidebar />
+        <main className="flex flex-1 flex-col items-center justify-center gap-2 bg-[var(--paper-bg)]">
+          <p className="font-prose text-lg text-[var(--ink-light)]">这页笔记暂时不在这里了。</p>
+          <button onClick={() => router.push("/")} className="text-sm text-[var(--gold)] hover:underline">
+            回书桌
+          </button>
+        </main>
+        <SpiritPanel />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />
-      <main className="flex-1 bg-[var(--paper-bg)] overflow-y-auto">
-        <div className="max-w-[780px] mx-auto px-6 py-6">
-          {/* Top bar */}
-          <div className="flex items-center justify-between mb-3">
-            <button onClick={() => router.push("/")} className="text-sm text-[var(--ink-faint)] hover:text-[var(--ink-light)]">← 回书桌</button>
-            <div className="text-sm text-[var(--ink-faint)]">{updateTime} · 字 {wordCount}</div>
+      <main className="flex-1 overflow-y-auto bg-[var(--paper-bg)]">
+        <div className="mx-auto max-w-[820px] px-6 py-6">
+          <div className="mb-3 flex items-center justify-between">
+            <button onClick={() => router.push("/")} className="text-sm text-[var(--ink-faint)] hover:text-[var(--ink-light)]">
+              回书桌
+            </button>
+            <div className="text-sm text-[var(--ink-faint)]">
+              {formatRelative(note.updatedAt || note.createdAt)} · {countWords(note.contentMd)} 字
+            </div>
             <div className="flex items-center gap-1">
-              <button onClick={() => setTab("append")} className="px-3 py-1.5 text-sm text-[var(--ink-light)] hover:bg-[var(--paper-hover)] rounded-lg">续写</button>
-              <button onClick={handleDelete} className="px-3 py-1.5 text-sm text-[var(--ink-faint)] hover:text-red-400 rounded-lg hover:bg-red-50">撕掉</button>
+              <button onClick={() => setTab("append")} className="rounded-lg px-3 py-1.5 text-sm text-[var(--ink-light)] hover:bg-[var(--paper-hover)]">
+                续写
+              </button>
+              <button onClick={handleDelete} className="rounded-lg px-3 py-1.5 text-sm text-[var(--ink-faint)] hover:bg-red-50 hover:text-red-400">
+                删除
+              </button>
             </div>
           </div>
 
-          {/* Title */}
-          <div className="paper-card p-6 mb-3">
+          <div className="paper-card mb-3 p-6">
             {editingTitle ? (
-              <div className="flex gap-2"><input className="flex-1 text-xl font-bold text-[var(--ink)] font-prose outline-none border-b border-[var(--paper-border)]" value={editTitle} onChange={e=>setEditTitle(e.target.value)} autoFocus /><button onClick={handleSaveTitle} className="text-sm text-[var(--gold)]">收好</button><button onClick={()=>setEditingTitle(false)} className="text-sm text-[var(--ink-faint)]">算了</button></div>
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 border-b border-[var(--paper-border)] text-xl font-bold leading-snug text-[var(--ink)] outline-none"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  autoFocus
+                />
+                <button onClick={handleSaveTitle} className="text-sm text-[var(--gold)]">
+                  保存
+                </button>
+                <button onClick={() => setEditingTitle(false)} className="text-sm text-[var(--ink-faint)]">
+                  取消
+                </button>
+              </div>
             ) : (
-              <h1 className="text-xl font-bold text-[var(--ink)] leading-snug font-prose cursor-pointer hover:text-[var(--gold)]" onClick={()=>{setEditTitle(title);setEditingTitle(true);}} title="点击修改标题">
-                {title || "（无标题，点击添加）"}
+              <h1
+                className="cursor-pointer text-xl font-bold leading-snug text-[var(--ink)] hover:text-[var(--gold)]"
+                onClick={() => {
+                  setEditTitle(title);
+                  setEditingTitle(true);
+                }}
+                title="点击修改标题"
+              >
+                {title || "（这页还没有标题）"}
               </h1>
             )}
-            <div className="flex flex-wrap items-center gap-1.5 mt-4">
-              {hasSource && <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">收录自{platformLabel(note.type)}</span>}
+
+            {summary && <p className="mt-3 text-sm leading-7 text-[var(--ink-light)]">{summary}</p>}
+
+            <div className="mt-4 flex flex-wrap items-center gap-1.5">
+              {hasSource && (
+                <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-600">
+                  来自 {platformLabel(note.type)}
+                </span>
+              )}
               {note.tags?.map((nt: any) => (
-                <span key={nt.tag.id} className="text-xs text-[var(--gold)] bg-[var(--gold-light)] px-2 py-0.5 rounded-full group flex items-center gap-1">
-                  <span className="cursor-pointer" onClick={() => router.push(`/?tag=${encodeURIComponent(nt.tag.fullPath)}`)}>#{nt.tag.fullPath}</span>
-                  <button onClick={(e)=>{e.stopPropagation();handleDeleteTag(nt.tag.id);}} className="opacity-0 group-hover:opacity-100 text-[var(--ink-faint)] hover:text-red-400">×</button>
+                <span
+                  key={nt.tag.id}
+                  className="group flex items-center gap-1 rounded-full bg-[var(--gold-light)] px-2 py-0.5 text-xs text-[var(--gold)]"
+                >
+                  <span className="cursor-pointer" onClick={() => router.push(`/?tag=${encodeURIComponent(nt.tag.fullPath)}`)}>
+                    #{nt.tag.fullPath}
+                  </span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteTag(nt.tag.id);
+                    }}
+                    className="opacity-0 transition-opacity group-hover:opacity-100 hover:text-red-400"
+                  >
+                    ×
+                  </button>
                 </span>
               ))}
               {showTagInput ? (
                 <span className="flex items-center gap-1">
-                  <input className="text-xs px-2 py-0.5 rounded-full border border-[var(--gold)] outline-none w-28" placeholder="如 产品/AI" value={addTagText} onChange={(e) => setAddTagText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") handleAddTag(); if (e.key === "Escape") { setShowTagInput(false); setAddTagText(""); } }} autoFocus />
-                  <button onClick={handleAddTag} className="text-xs text-[var(--gold)]">✓</button>
-                  <button onClick={() => { setShowTagInput(false); setAddTagText(""); }} className="text-xs text-[var(--ink-faint)]">✕</button>
+                  <input
+                    className="w-28 rounded-full border border-[var(--gold)] px-2 py-0.5 text-xs outline-none"
+                    placeholder="如 产品/AI"
+                    value={addTagText}
+                    onChange={(e) => setAddTagText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleAddTag();
+                      if (e.key === "Escape") {
+                        setShowTagInput(false);
+                        setAddTagText("");
+                      }
+                    }}
+                    autoFocus
+                  />
+                  <button onClick={handleAddTag} className="text-xs text-[var(--gold)]">
+                    保存
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowTagInput(false);
+                      setAddTagText("");
+                    }}
+                    className="text-xs text-[var(--ink-faint)]"
+                  >
+                    取消
+                  </button>
                 </span>
               ) : (
-                <button onClick={() => { setShowTagInput(true); setAddTagText(""); }} className="text-xs text-[var(--ink-faint)] hover:text-[var(--gold)] px-2 py-1 rounded-full border border-dashed border-[var(--paper-border)]">+ 标签</button>
+                <button
+                  onClick={() => {
+                    setShowTagInput(true);
+                    setAddTagText("");
+                  }}
+                  className="rounded-full border border-dashed border-[var(--paper-border)] px-2 py-1 text-xs text-[var(--ink-faint)] hover:text-[var(--gold)]"
+                >
+                  + 标签
+                </button>
               )}
             </div>
           </div>
 
-          {/* Tabs */}
-          <div className="flex gap-0 mb-0">
-            {[{ key: "spirit" as Tab, label: "🧚 精灵的话" }, { key: "content" as Tab, label: "笔记正文" }, { key: "source" as Tab, label: "出处", hide: !hasSource }, { key: "append" as Tab, label: "续写" }].filter(t=>!t.hide).map(t=>(
-              <button key={t.key} onClick={()=>setTab(t.key)} className={`px-5 py-2.5 text-sm transition-colors border-b-2 ${tab===t.key?"text-[var(--ink)] border-[var(--gold)] font-medium":"text-[var(--ink-faint)] border-transparent hover:text-[var(--ink-light)]"}`}>{t.label}</button>
-            ))}
+          <div className="mb-0 flex gap-0">
+            {[
+              { key: "spirit" as Tab, label: "笔记精灵" },
+              { key: "content" as Tab, label: "笔记正文" },
+              { key: "source" as Tab, label: "出处", hide: !hasSource },
+              { key: "append" as Tab, label: "续写" },
+            ]
+              .filter((item) => !item.hide)
+              .map((item) => (
+                <button
+                  key={item.key}
+                  onClick={() => setTab(item.key)}
+                  className={`border-b-2 px-5 py-2.5 text-sm transition-colors ${
+                    tab === item.key
+                      ? "border-[var(--gold)] font-medium text-[var(--ink)]"
+                      : "border-transparent text-[var(--ink-faint)] hover:text-[var(--ink-light)]"
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
           </div>
 
-          {/* Content */}
-          <div className="paper-card rounded-tl-none p-6 min-h-[300px]">
+          <div className="paper-card min-h-[320px] rounded-tl-none p-6">
             {tab === "spirit" && (
-              isAutoNote ? (
-                reportLoading ? <div className="flex flex-col items-center gap-3 py-16"><span className="text-3xl animate-bounce">🧚</span><p className="text-sm text-[var(--ink-faint)]">精灵正在展读...</p></div>
-                : report ? (
-                  editingReport ? (
-                    <div><textarea className="w-full min-h-[300px] p-4 text-sm rounded-xl border border-[var(--paper-border)] outline-none resize-none font-prose" value={editReport} onChange={e=>setEditReport(e.target.value)} autoFocus /><div className="flex gap-2 mt-2"><button onClick={handleSaveReport} className="px-4 py-1.5 text-sm rounded-full text-white" style={{background:"var(--gold)"}}>收好</button><button onClick={()=>setEditingReport(false)} className="px-4 py-1.5 text-sm text-[var(--ink-light)]">算了</button></div></div>
-                  ) : (
-                    <div>
-                      <div className="prose-note text-sm"><MarkdownView content={report} /></div>
-                      <button onClick={()=>{setEditReport(report);setEditingReport(true);}} className="mt-3 text-xs text-[var(--ink-faint)] hover:text-[var(--gold)]">✎ 修改</button>
+              <div className="space-y-6">
+                <section>
+                  <div className="mb-2 flex items-center gap-2">
+                    <span className="text-base">✦</span>
+                    <h2 className="text-sm font-medium text-[var(--ink)]">精灵整理</h2>
+                  </div>
+
+                  {!summary && keyPoints.length === 0 && keywords.length === 0 && (
+                    <p className="text-sm text-[var(--ink-faint)]">这页还没整理完，精灵正在慢慢读。</p>
+                  )}
+
+                  {summary && (
+                    <div className="mb-4 rounded-xl border border-[var(--paper-border)] bg-[var(--paper-card)] p-4">
+                      <p className="text-xs text-[var(--ink-faint)]">一句话理解</p>
+                      <p className="mt-2 text-sm leading-7 text-[var(--ink-light)]">{summary}</p>
                     </div>
-                  )
-                ) : <div className="text-center py-12"><button onClick={()=>{setReportLoading(true);fetch("/api/ai/report",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({noteId:note.id,model:localStorage.getItem("nf_model")||undefined,apiKey:localStorage.getItem("nf_api_key")||undefined,baseUrl:localStorage.getItem("nf_base_url")||undefined})}).then(r=>r.json()).then(d=>{if(d.report)setReport(d.report);setReportLoading(false);});}} className="px-4 py-2 text-sm text-[var(--gold)] hover:underline">让精灵读一读</button></div>
-              ) : (
-                <div className="text-center py-16">
-                  <span className="text-3xl mb-3 block">🧚</span>
-                  <p className="text-base text-[var(--ink)] font-prose mb-2">亲手写下的文字</p>
-                  <p className="text-sm text-[var(--ink-faint)] mb-5">精灵不会擅自解读。需要的话——</p>
-                  <button onClick={()=>setTab("content")} className="px-5 py-2 text-sm rounded-full text-white" style={{background:"var(--gold)"}}>跟精灵聊聊这条想法</button>
-                </div>
-              )
+                  )}
+
+                  {keyPoints.length > 0 && (
+                    <div className="mb-4 rounded-xl border border-[var(--paper-border)] bg-[var(--paper-card)] p-4">
+                      <p className="text-xs text-[var(--ink-faint)]">值得记住的几点</p>
+                      <ul className="mt-3 space-y-2 text-sm leading-7 text-[var(--ink-light)]">
+                        {keyPoints.map((point, index) => (
+                          <li key={`${point}-${index}`} className="flex gap-2">
+                            <span className="mt-[9px] h-1.5 w-1.5 rounded-full bg-[var(--gold)]" />
+                            <span>{point}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {(keywords.length > 0 || suggestedTags.length > 0) && (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border border-[var(--paper-border)] bg-[var(--paper-card)] p-4">
+                        <p className="text-xs text-[var(--ink-faint)]">关键词</p>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {keywords.map((keyword) => (
+                            <span key={keyword} className="rounded-full bg-[var(--sage-light)] px-2 py-1 text-xs text-[var(--sage)]">
+                              {keyword}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-[var(--paper-border)] bg-[var(--paper-card)] p-4">
+                        <p className="text-xs text-[var(--ink-faint)]">精灵建议的标签</p>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {suggestedTags.map((tag) => (
+                            <span key={tag} className="rounded-full border border-dashed border-[var(--paper-border)] px-2 py-1 text-xs text-[var(--ink-light)]">
+                              #{tag}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </section>
+
+                <section>
+                  <div className="mb-2 flex items-center gap-2">
+                    <span className="text-base">✦</span>
+                    <h2 className="text-sm font-medium text-[var(--ink)]">精灵读后感</h2>
+                  </div>
+
+                  {reportLoading ? (
+                    <div className="flex flex-col items-center gap-3 py-10">
+                      <span className="text-3xl">✦</span>
+                      <p className="text-sm text-[var(--ink-faint)]">精灵正在把这页慢慢读成一段话。</p>
+                    </div>
+                  ) : report ? (
+                    editingReport ? (
+                      <div>
+                        <textarea
+                          className="min-h-[280px] w-full resize-none rounded-xl border border-[var(--paper-border)] p-4 text-sm outline-none"
+                          value={editReport}
+                          onChange={(e) => setEditReport(e.target.value)}
+                          autoFocus
+                        />
+                        <div className="mt-2 flex gap-2">
+                          <button onClick={handleSaveReport} className="rounded-full px-4 py-1.5 text-sm text-white" style={{ background: "var(--gold)" }}>
+                            保存
+                          </button>
+                          <button onClick={() => setEditingReport(false)} className="px-4 py-1.5 text-sm text-[var(--ink-light)]">
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="prose-note text-sm">
+                          <MarkdownView content={report} />
+                        </div>
+                        <button
+                          onClick={() => {
+                            setEditReport(report);
+                            setEditingReport(true);
+                          }}
+                          className="mt-3 text-xs text-[var(--ink-faint)] hover:text-[var(--gold)]"
+                        >
+                          编辑这段阅读稿
+                        </button>
+                      </div>
+                    )
+                  ) : (
+                    <div className="text-center py-10">
+                      <button
+                        onClick={() => {
+                          setReportLoading(true);
+                          fetch("/api/ai/report", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              noteId: note.id,
+                              model: localStorage.getItem("nf_model") || undefined,
+                              apiKey: localStorage.getItem("nf_api_key") || undefined,
+                              baseUrl: localStorage.getItem("nf_base_url") || undefined,
+                            }),
+                          })
+                            .then((r) => r.json())
+                            .then((d) => {
+                              if (d.report) setReport(d.report);
+                              setReportLoading(false);
+                            });
+                        }}
+                        className="px-4 py-2 text-sm text-[var(--gold)] hover:underline"
+                      >
+                        让精灵读一遍
+                      </button>
+                    </div>
+                  )}
+                </section>
+
+                {spiritQuestions.length > 0 && (
+                  <section>
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="text-base">✦</span>
+                      <h2 className="text-sm font-medium text-[var(--ink)]">继续聊下去</h2>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {spiritQuestions.map((question) => (
+                        <button
+                          key={question}
+                          onClick={() => {
+                            navigator.clipboard.writeText(question).catch(() => {});
+                          }}
+                          className="rounded-full border border-[var(--paper-border)] px-3 py-1.5 text-xs text-[var(--ink-light)] hover:bg-[var(--paper-hover)]"
+                        >
+                          {question}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </div>
             )}
+
             {tab === "content" && (
               editingContent ? (
-                <div><textarea className="w-full min-h-[400px] p-5 text-[16px] leading-relaxed outline-none resize-none rounded-card border border-[var(--paper-border)] bg-[var(--paper-card)] text-[var(--ink)] font-prose" value={editContent} onChange={e=>setEditContent(e.target.value)} autoFocus /><div className="flex gap-2 mt-3"><button onClick={handleSaveContent} className="px-4 py-1.5 text-sm rounded-full text-white" style={{background:"var(--gold)"}}>收好</button><button onClick={()=>{setEditContent(note.contentMd);setEditingContent(false);}} className="px-4 py-1.5 text-sm text-[var(--ink-light)]">放下</button></div></div>
+                <div>
+                  <textarea
+                    className="min-h-[400px] w-full resize-none rounded-xl border border-[var(--paper-border)] bg-[var(--paper-card)] p-5 text-[16px] leading-relaxed text-[var(--ink)] outline-none"
+                    value={editContent}
+                    onChange={(e) => setEditContent(e.target.value)}
+                    autoFocus
+                  />
+                  <div className="mt-3 flex gap-2">
+                    <button onClick={handleSaveContent} className="rounded-full px-4 py-1.5 text-sm text-white" style={{ background: "var(--gold)" }}>
+                      保存
+                    </button>
+                    <button
+                      onClick={() => {
+                        setEditContent(note.contentMd);
+                        setEditingContent(false);
+                      }}
+                      className="px-4 py-1.5 text-sm text-[var(--ink-light)]"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <div>
                   <MarkdownView content={note.contentMd} />
-                  <button onClick={()=>setEditingContent(true)} className="mt-4 text-xs text-[var(--ink-faint)] hover:text-[var(--gold)]">✎ 删改正文</button>
+                  <button onClick={() => setEditingContent(true)} className="mt-4 text-xs text-[var(--ink-faint)] hover:text-[var(--gold)]">
+                    编辑正文
+                  </button>
                 </div>
               )
             )}
+
             {tab === "source" && hasSource && (
               <div>
-                <p className="text-sm text-[var(--ink-faint)] mb-2">出处</p>
-                <a href={note.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-[var(--gold)] hover:underline break-all">{note.sourceUrl}</a>
-                <div className="mt-4 p-4 rounded-xl bg-[var(--paper-bg)] border border-[var(--paper-border)]"><p className="text-sm text-[var(--ink-light)]">来自 · {platformLabel(note.type)}</p><p className="text-sm text-[var(--ink-light)] mt-1">收于 · {new Date(note.createdAt).toLocaleString("zh-CN")}</p></div>
+                <p className="mb-2 text-sm text-[var(--ink-faint)]">出处</p>
+                <a href={note.sourceUrl} target="_blank" rel="noopener noreferrer" className="break-all text-sm text-[var(--gold)] hover:underline">
+                  {note.sourceUrl}
+                </a>
+                <div className="mt-4 rounded-xl border border-[var(--paper-border)] bg-[var(--paper-bg)] p-4">
+                  <p className="text-sm text-[var(--ink-light)]">来自 · {platformLabel(note.type)}</p>
+                  <p className="mt-1 text-sm text-[var(--ink-light)]">
+                    收录于 · {new Date(note.createdAt).toLocaleString("zh-CN")}
+                  </p>
+                </div>
               </div>
             )}
+
             {tab === "append" && (
-              <div><p className="text-sm text-[var(--ink-faint)] mb-3">在这页后面接着写</p><textarea className="w-full min-h-[180px] p-4 rounded-xl outline-none border border-[var(--paper-border)] bg-[var(--paper-card)] text-[var(--ink)] font-prose text-sm leading-relaxed resize-none" placeholder="续写..." value={appendText} onChange={e=>setAppendText(e.target.value)} autoFocus /><div className="flex gap-2 mt-3"><button onClick={handleAppend} disabled={!appendText.trim()||appending} className="px-4 py-2 text-sm rounded-full text-white disabled:opacity-25" style={{background:"var(--gold)"}}>{appending?"续写中...":"接到后面"}</button><button onClick={()=>{setAppendText("");setTab("content");}} className="px-4 py-2 text-sm text-[var(--ink-light)] rounded-full hover:bg-[var(--paper-hover)]">算了</button></div></div>
+              <div>
+                <p className="mb-3 text-sm text-[var(--ink-faint)]">在这页后面接着写。</p>
+                <textarea
+                  className="min-h-[180px] w-full resize-none rounded-xl border border-[var(--paper-border)] bg-[var(--paper-card)] p-4 text-sm leading-relaxed text-[var(--ink)] outline-none"
+                  placeholder="继续写..."
+                  value={appendText}
+                  onChange={(e) => setAppendText(e.target.value)}
+                  autoFocus
+                />
+                <div className="mt-3 flex gap-2">
+                  <button
+                    onClick={handleAppend}
+                    disabled={!appendText.trim() || appending}
+                    className="rounded-full px-4 py-2 text-sm text-white disabled:opacity-25"
+                    style={{ background: "var(--gold)" }}
+                  >
+                    {appending ? "续写中..." : "接到后面"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setAppendText("");
+                      setTab("content");
+                    }}
+                    className="rounded-full px-4 py-2 text-sm text-[var(--ink-light)] hover:bg-[var(--paper-hover)]"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -197,5 +582,34 @@ export default function NoteDetailPage() {
     </div>
   );
 }
-function formatRelative(iso: string): string { if(!iso)return"";const d=new Date(iso),diff=Date.now()-d.getTime(),m=Math.floor(diff/60000),h=Math.floor(diff/3600000),days=Math.floor(diff/86400000);if(m<1)return"方才";if(m<60)return`${m}分钟前`;if(h<24)return`${h}小时前`;if(days<7)return`${days}天前`;return d.toLocaleDateString("zh-CN",{month:"short",day:"numeric"});}
-function platformLabel(t: string): string { const m:Record<string,string>={douyin:"抖音",bilibili:"B站",youtube:"YouTube",xiaohongshu:"小红书",web:"网页",pdf:"PDF"};return m[t]||t; }
+
+function countWords(content: string): number {
+  return content?.replace(/[#*`~>\[\]()!|\-\n\s]/g, "")?.length || 0;
+}
+
+function formatRelative(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const diff = Date.now() - d.getTime();
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  if (hours < 24) return `${hours} 小时前`;
+  if (days < 7) return `${days} 天前`;
+  return d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+}
+
+function platformLabel(type: string): string {
+  const labels: Record<string, string> = {
+    douyin: "抖音",
+    bilibili: "B站",
+    youtube: "YouTube",
+    xiaohongshu: "小红书",
+    web: "网页",
+    pdf: "PDF",
+    link: "链接",
+  };
+  return labels[type] || type;
+}

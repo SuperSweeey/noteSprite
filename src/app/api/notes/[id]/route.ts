@@ -33,7 +33,7 @@ export async function PATCH(
         const ids = await ensureTagHierarchy(userId, tagPath);
         allIds.push(...ids);
       }
-      for (const tagId of [...new Set(allIds)]) {
+      for (const tagId of Array.from(new Set(allIds))) {
         await prisma.noteTag.create({ data: { noteId: note.id, tagId } });
       }
     }

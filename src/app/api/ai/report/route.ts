@@ -3,49 +3,75 @@ import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getAIConfig } from "@/lib/ai-config";
 
-// PUT - save edited report
+// PUT - save edited spirit reading
 export async function PUT(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
     const { noteId, report } = await req.json();
-    if (!noteId || !report) return NextResponse.json({ error: "missing params" }, { status: 400 });
+    if (!noteId || !report) {
+      return NextResponse.json({ error: "missing params" }, { status: 400 });
+    }
+
     await prisma.aIResult.upsert({
       where: { noteId },
-      create: { noteId, summary: report, keyPoints: "[]", keywords: "[]", suggestedTags: "[]", actionItems: "[]", reviewQuestions: "[]" },
-      update: { summary: report },
+      create: {
+        noteId,
+        summary: "",
+        keyPoints: "[]",
+        keywords: "[]",
+        suggestedTags: "[]",
+        actionItems: report,
+        reviewQuestions: "[]",
+      },
+      update: { actionItems: report },
     });
+
     return NextResponse.json({ ok: true });
-  } catch (e: any) { return NextResponse.json({ error: e.message }, { status: 500 }); }
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
 }
 
 export async function POST(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
-    const { noteId, model: modelOverride, apiKey: apiKeyOverride, baseUrl: baseUrlOverride } = await req.json();
-    if (!noteId) return NextResponse.json({ error: "noteId required" }, { status: 400 });
+    const {
+      noteId,
+      model: modelOverride,
+      apiKey: apiKeyOverride,
+      baseUrl: baseUrlOverride,
+    } = await req.json();
+
+    if (!noteId) {
+      return NextResponse.json({ error: "noteId required" }, { status: 400 });
+    }
 
     const config = await getAIConfig(userId, "report");
-
     const model = (modelOverride && modelOverride.trim()) || config.model;
     const apiKey = (apiKeyOverride && apiKeyOverride.trim()) || config.apiKey;
     const baseUrl = (baseUrlOverride && baseUrlOverride.trim()) || config.baseUrl;
 
     const note = await prisma.note.findFirst({ where: { id: noteId, userId } });
-    if (!note) return NextResponse.json({ error: "not found" }, { status: 404 });
-
-    const existing = await prisma.aIResult.findUnique({ where: { noteId } });
-    if (existing?.summary && existing.summary.includes("## ")) {
-      return NextResponse.json({ report: existing.summary });
+    if (!note) {
+      return NextResponse.json({ error: "not found" }, { status: 404 });
     }
 
-    if (!apiKey) return NextResponse.json({ report: "未配置 API Key。" });
+    const existing = await prisma.aIResult.findUnique({ where: { noteId } });
+    if (existing?.actionItems && existing.actionItems.includes("## ")) {
+      return NextResponse.json({ report: existing.actionItems });
+    }
+
+    if (!apiKey) {
+      return NextResponse.json({ report: "" });
+    }
 
     const defaultPrompt =
-      "你是笔记精灵，温柔地帮用户读笔记。请按以下格式输出（Markdown）：\n\n" +
-      "## 💭 概要\n用自然的语气，2-3句话概括这条笔记的核心。像朋友为你简述。\n\n" +
-      "## 🔑 要点\n- 要点一，具体不空洞\n- 要点二\n- 要点三（3~5个）\n\n" +
-      "## 🌟 可带走什么\n1~2句话，说说读完这条笔记的收获。\n\n" +
-      "语气温润，像旧友闲谈。不要标签。不要'作为AI'。";
+      "你是笔记精灵。请温柔、清楚地阅读用户笔记，并输出一份 Markdown 整理稿。\n\n" +
+      "请按以下结构输出：\n" +
+      "## 今天这页在说什么\n2到3句话概括核心意思。\n\n" +
+      "## 值得记住的几点\n用 3 到 5 条无序列表写出具体要点。\n\n" +
+      "## 可以接着想的问题\n给出 2 到 3 个自然的问题，帮助用户继续思考。\n\n" +
+      "语气要像住在笔记里的精灵，温柔、有陪伴感，但不要夸张，不要自称 AI。";
     const systemPrompt = config.prompt || defaultPrompt;
 
     const resp = await fetch(baseUrl + "/chat/completions", {
@@ -62,15 +88,25 @@ export async function POST(req: NextRequest) {
       }),
     });
 
-    if (!resp.ok) return NextResponse.json({ report: "" });
+    if (!resp.ok) {
+      return NextResponse.json({ report: "" });
+    }
 
     const json = await resp.json();
     const report = json.choices?.[0]?.message?.content || "";
 
     await prisma.aIResult.upsert({
       where: { noteId },
-      create: { noteId, summary: report, keyPoints: "[]", keywords: "[]", suggestedTags: "[]", actionItems: "[]", reviewQuestions: "[]" },
-      update: { summary: report },
+      create: {
+        noteId,
+        summary: existing?.summary || "",
+        keyPoints: existing?.keyPoints || "[]",
+        keywords: existing?.keywords || "[]",
+        suggestedTags: existing?.suggestedTags || "[]",
+        actionItems: report,
+        reviewQuestions: existing?.reviewQuestions || "[]",
+      },
+      update: { actionItems: report },
     });
 
     return NextResponse.json({ report });

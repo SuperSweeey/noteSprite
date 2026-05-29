@@ -129,8 +129,8 @@ async function runTranscription(
           data: {
             noteId,
             model: analysisConfig.model || "deepseek-v4-flash",
-            summary: analysis.title,
-            keyPoints: JSON.stringify(analysis.keywords),
+            summary: analysis.summary,
+            keyPoints: JSON.stringify(analysis.keyPoints),
             keywords: JSON.stringify(analysis.keywords),
             suggestedTags: JSON.stringify(analysis.suggestedTags),
           },
@@ -177,8 +177,9 @@ async function ensureTag(userId: string, fullPath: string): Promise<string> {
       parentId = existing.id;
       leafId = existing.id;
     } else {
-      const created = await prisma.tag.create({
+      const created: { id: string } = await prisma.tag.create({
         data: { userId, name: parts[i], fullPath: currentPath, parentId },
+        select: { id: true },
       });
       parentId = created.id;
       leafId = created.id;
