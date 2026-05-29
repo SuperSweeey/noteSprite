@@ -1,0 +1,237 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./noteflow.db"
+}
+
+// --- 用户与认证 ---
+
+model User {
+  id        String   @id @default(uuid())
+  name      String?
+  email     String?  @unique
+  settings  String   @default("{}") // JSON blob: { apiKey, baseUrl, models: { chat, analysis, report, title }, prompts: { chat, analysis, report } }
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  accounts Account[]
+  notes    Note[]
+  sessions Session[]
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(uuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refreshToken      String? @map("refresh_token")
+  accessToken       String? @map("access_token")
+  expiresAt         Int?    @map("expires_at")
+  tokenType         String? @map("token_type")
+  scope             String?
+  idToken           String? @map("id_token")
+  sessionState      String? @map("session_state")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("sessions")
+}
+
+// --- 笔记 ---
+
+model Note {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  title       String   @default("")
+  contentMd   String   @map("content_md")
+  plainText   String   @default("") @map("plain_text")
+  type        String   @default("manual") // manual | web | pdf | image | audio | video | link
+  sourceUrl   String?  @map("source_url")
+  knowledgeBaseId String? @map("knowledge_base_id")
+  folderId    String?  @map("folder_id")
+  status      String   @default("inbox") // inbox | archived | deleted
+  reviewStatus String  @default("none") @map("review_status") // none | pending | mastered | fuzzy | forgotten | paused
+  nextReviewAt DateTime? @map("next_review_at")
+  lastReviewedAt DateTime? @map("last_reviewed_at")
+  reviewCount Int      @default(0) @map("review_count")
+  mastery     Int      @default(0) // 0-100 mastery score
+  version     Int      @default(1)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  knowledgeBase KnowledgeBase? @relation(fields: [knowledgeBaseId], references: [id])
+  folder       Folder?        @relation(fields: [folderId], references: [id])
+  tags         NoteTag[]
+  assets       Asset[]
+  aiResult     AIResult?
+  chatMessages ChatMessage[]
+  @@map("notes")
+}
+
+// --- 标签（flomo 式 #a/b/c） ---
+
+model Tag {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  name      String    // 标签名，如 "功能设计"
+  fullPath  String    @unique @map("full_path") // 完整路径，如 "产品/AI笔记/功能设计"
+  parentId  String?   @map("parent_id")
+  noteCount Int       @default(0) @map("note_count")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  parent   Tag?      @relation("TagHierarchy", fields: [parentId], references: [id])
+  children Tag[]     @relation("TagHierarchy")
+  notes    NoteTag[]
+  @@map("tags")
+}
+
+model NoteTag {
+  id     String @id @default(uuid())
+  noteId String @map("note_id")
+  tagId  String @map("tag_id")
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  @@unique([noteId, tagId])
+  @@map("note_tags")
+}
+
+// --- 知识库 ---
+
+model KnowledgeBase {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  name        String
+  description String   @default("")
+  icon        String   @default("📁")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  notes   Note[]
+  folders Folder[]
+  @@map("knowledge_bases")
+}
+
+model Folder {
+  id              String   @id @default(uuid())
+  knowledgeBaseId String   @map("knowledge_base_id")
+  name            String
+  parentId        String?  @map("parent_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  knowledgeBase KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  parent        Folder?       @relation("FolderHierarchy", fields: [parentId], references: [id])
+  children      Folder[]      @relation("FolderHierarchy")
+  notes         Note[]
+  @@map("folders")
+}
+
+// --- 文件资产 ---
+
+model Asset {
+  id               String   @id @default(uuid())
+  userId           String   @map("user_id")
+  noteId           String?  @map("note_id")
+  fileName         String   @map("file_name")
+  fileType         String   @map("file_type") // image | pdf | audio | video | document | other
+  mimeType         String   @map("mime_type")
+  fileSize         Int      @map("file_size")
+  storagePath      String   @map("storage_path") // COS key
+  storageUrl       String?  @map("storage_url") // COS CDN URL
+  processingStatus String   @default("pending") @map("processing_status") // pending | uploading | uploaded | processing | completed | failed
+  transcript       String?  // 音视频转录文本
+  ocrText          String?  @map("ocr_text") // 图片 OCR 文本
+  aiSummary        String?  @map("ai_summary") // AI 文件摘要
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  note Note? @relation(fields: [noteId], references: [id], onDelete: SetNull)
+  @@map("assets")
+}
+
+// --- AI 结果 ---
+
+model AIResult {
+  id             String   @id @default(uuid())
+  noteId         String   @unique @map("note_id")
+  model          String   @default("deepseek-v4-flash")
+  summary        String   @default("")
+  keyPoints      String   @default("") @map("key_points") // JSON array
+  keywords       String   @default("") // JSON array
+  suggestedTags  String   @default("") @map("suggested_tags") // JSON array of tag paths
+  suggestedKb    String?  @map("suggested_kb")
+  actionItems    String   @default("") @map("action_items") // JSON array
+  reviewQuestions String  @default("") @map("review_questions") // JSON array
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  @@map("ai_results")
+}
+
+// --- 同步 ---
+
+model SyncCursor {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  deviceId        String   @map("device_id")
+  lastSyncVersion Int      @default(0) @map("last_sync_version")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, deviceId])
+  @@map("sync_cursors")
+}
+
+model ChangeLog {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  entityType String  @map("entity_type") // note | tag | knowledge_base | folder | asset
+  entityId  String   @map("entity_id")
+  action    String   // create | update | delete
+  version   Int
+  data      String?  // JSON payload for the change
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("change_logs")
+}
+
+// --- 笔记精灵对话 ---
+
+model Conversation {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  title     String   @default("新对话")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  messages ChatMessage[]
+  @@map("conversations")
+}
+
+model ChatMessage {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  conversationId String?  @map("conversation_id")
+  noteId         String?  @map("note_id")
+  role           String   // user | assistant
+  content        String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  note         Note?         @relation(fields: [noteId], references: [id], onDelete: SetNull)
+  @@map("chat_messages")
+}

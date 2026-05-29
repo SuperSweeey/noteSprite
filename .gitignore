@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+.next/
+out/
+
+# Environment
+.env
+.env.local
+
+# Python pipeline
+python/**/__pycache__/
+python/**/*.pyc
+python/output/
+
+# Database
+prisma/noteflow.db
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+
+# Build cache
+*.tsbuildinfo
