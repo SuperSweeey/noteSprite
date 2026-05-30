@@ -71,7 +71,7 @@ export async function POST(req: NextRequest) {
     });
     await prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
 
-    const context = await buildNoteContext(userId, noteId);
+    const context = await buildNoteContext(userId, question, noteId);
     const history = await prisma.chatMessage.findMany({
       where: { userId, conversationId },
       orderBy: { createdAt: "desc" },
@@ -183,7 +183,7 @@ export async function DELETE(req: NextRequest) {
   return NextResponse.json({ ok: true });
 }
 
-async function buildNoteContext(userId: string, noteId?: string): Promise<string> {
+async function buildNoteContext(userId: string, question: string, noteId?: string): Promise<string> {
   const chunks: string[] = [];
   if (noteId) {
     const note = await prisma.note.findFirst({ where: { id: noteId, userId }, include: { aiResult: true } });
@@ -193,6 +193,42 @@ async function buildNoteContext(userId: string, noteId?: string): Promise<string
       if (note.aiResult?.actionItems) {
         chunks.push(`\n【已有 AI 解读】\n${note.aiResult.actionItems.slice(0, 3000)}`);
       }
+    }
+  }
+
+  const keywords = extractSearchTerms(question);
+  if (keywords.length > 0) {
+    const relatedNotes = await prisma.note.findMany({
+      where: {
+        userId,
+        deletedAt: null,
+        id: noteId ? { not: noteId } : undefined,
+        OR: keywords.flatMap((term) => [
+          { title: { contains: term } },
+          { plainText: { contains: term } },
+          { contentMd: { contains: term } },
+          { aiResult: { is: { summary: { contains: term } } } },
+          { aiResult: { is: { actionItems: { contains: term } } } },
+          { tags: { some: { tag: { fullPath: { contains: term } } } } },
+        ]),
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 6,
+      include: { aiResult: true, tags: { include: { tag: true } } },
+    });
+
+    if (relatedNotes.length > 0) {
+      chunks.push("【按问题检索到的相关笔记】");
+      chunks.push(
+        relatedNotes
+          .map((note) => {
+            const tags = note.tags.map((nt) => `#${nt.tag.fullPath}`).join(" ");
+            const report = note.aiResult?.actionItems ? `\nAI 解读摘录：${note.aiResult.actionItems.slice(0, 420)}` : "";
+            return `标题：${note.title || note.contentMd.slice(0, 40)}\n标签：${tags || "无"}\n正文摘录：${note.contentMd.slice(0, 520)}${report}`;
+          })
+          .join("\n---\n")
+          .slice(0, 4200)
+      );
     }
   }
 
@@ -216,6 +252,22 @@ async function buildNoteContext(userId: string, noteId?: string): Promise<string
   }
 
   return chunks.join("\n\n");
+}
+
+function extractSearchTerms(question: string): string[] {
+  const cleaned = question
+    .replace(/[，。！？；：、,.!?;:()[\]{}"'“”‘’]/g, " ")
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const terms = new Set<string>();
+  for (const item of cleaned) {
+    if (item.length >= 2 && !/^(什么|怎么|如何|为什么|一下|这个|那个|请问|帮我|分析|总结)$/.test(item)) {
+      terms.add(item.slice(0, 20));
+    }
+  }
+  if (terms.size === 0 && question.trim().length >= 2) terms.add(question.trim().slice(0, 12));
+  return Array.from(terms).slice(0, 5);
 }
 
 async function callModel({
