@@ -61,6 +61,7 @@ export default function NoteDetailPage() {
   const [addTagText, setAddTagText] = useState("");
   const [saving, setSaving] = useState("");
   const [suggestedQuestion, setSuggestedQuestion] = useState("");
+  const [reuseMsg, setReuseMsg] = useState("");
 
   const noteId = params.id;
 
@@ -200,6 +201,42 @@ export default function NoteDetailPage() {
       setTab("content");
     }
     setAppending(false);
+  };
+
+  const handleAppendReport = async () => {
+    if (!note || !report.trim()) return;
+    setSaving("append-report");
+    const block = `## AI 解读\n\n${report.trim()}`;
+    const updated = await patchNote({ content: `${note.contentMd}\n\n---\n\n${block}` });
+    if (updated) {
+      setReuseMsg("AI 解读已追加到原文。");
+      setTab("content");
+    }
+    setSaving("");
+  };
+
+  const handleCreateNoteFromReport = async () => {
+    if (!note || !report.trim()) return;
+    setSaving("report-note");
+    const resp = await fetch("/api/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: `# ${title || "AI 解读"}\n\n> 来源笔记：${note.id}\n\n${report.trim()}` }),
+    });
+    if (resp.ok) {
+      const created = await resp.json();
+      router.push(`/note/${created.id}`);
+    } else {
+      setReportError("另存为新笔记失败了。");
+    }
+    setSaving("");
+  };
+
+  const handleCopyReport = async () => {
+    if (!report.trim()) return;
+    await navigator.clipboard.writeText(report);
+    setReuseMsg("AI 解读已复制。");
+    setTimeout(() => setReuseMsg(""), 1800);
   };
 
   const handleAddTag = async () => {
@@ -451,15 +488,27 @@ export default function NoteDetailPage() {
                         <article className="prose-note max-w-none text-[17px] leading-9">
                           <MarkdownView content={report} />
                         </article>
-                        <button
-                          onClick={() => {
-                            setEditReport(report);
-                            setEditingReport(true);
-                          }}
-                          className="mt-5 text-sm text-[var(--ink-faint)] hover:text-[var(--accent-blue)]"
-                        >
-                          编辑这篇解读
-                        </button>
+                        <div className="mt-5 flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setEditReport(report);
+                              setEditingReport(true);
+                            }}
+                            className="rounded-lg border border-[var(--paper-border)] px-3 py-2 text-sm text-[var(--ink-light)] hover:bg-[var(--paper-soft)]"
+                          >
+                            编辑解读
+                          </button>
+                          <button onClick={handleCopyReport} className="rounded-lg border border-[var(--paper-border)] px-3 py-2 text-sm text-[var(--ink-light)] hover:bg-[var(--paper-soft)]">
+                            复制
+                          </button>
+                          <button onClick={handleAppendReport} disabled={saving === "append-report"} className="rounded-lg border border-[var(--paper-border)] px-3 py-2 text-sm text-[var(--ink-light)] hover:bg-[var(--paper-soft)] disabled:opacity-40">
+                            {saving === "append-report" ? "追加中" : "追加到原文"}
+                          </button>
+                          <button onClick={handleCreateNoteFromReport} disabled={saving === "report-note"} className="rounded-lg bg-[var(--ink)] px-3 py-2 text-sm text-white disabled:opacity-40">
+                            {saving === "report-note" ? "保存中" : "另存为笔记"}
+                          </button>
+                          {reuseMsg && <span className="text-sm text-[var(--sage)]">{reuseMsg}</span>}
+                        </div>
                       </>
                     )}
                   </div>

@@ -140,6 +140,13 @@ export function MainWorkspace() {
     fetchNotes();
   };
 
+  const handlePermanentDelete = async (e: React.MouseEvent, noteId: string) => {
+    e.stopPropagation();
+    if (!confirm("永久删除后不能恢复，确定删除吗？")) return;
+    await fetch(`/api/notes/${noteId}?permanent=true`, { method: "DELETE" });
+    fetchNotes();
+  };
+
   const handleRetryTranscribe = async (e: React.MouseEvent, noteId: string) => {
     e.stopPropagation();
     if (retryingId) return;
@@ -159,6 +166,9 @@ export function MainWorkspace() {
 
   const grouped = groupByTime(notes);
   const stats = makeStats(notes);
+  const topTags = getTopTags(notes);
+  const sources = getSources(notes);
+  const attentionNotes = notes.filter((note) => note.status === "processing" || note.status === "failed").slice(0, 5);
 
   return (
     <main className="flex min-h-screen flex-1 flex-col bg-[var(--paper-bg)]">
@@ -321,6 +331,33 @@ export function MainWorkspace() {
               </div>
             )}
           </div>
+
+          {view !== "trash" && (
+            <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(260px,0.8fr)]">
+              <InsightPanel title="常用标签" empty="还没有标签。">
+                {topTags.map((item) => (
+                  <button key={item.tag} onClick={() => setActiveTag(item.tag)} className="rounded-full border border-[var(--paper-border)] bg-white px-3 py-1.5 text-xs text-[var(--ink-light)] hover:border-[var(--accent-blue)] hover:text-[var(--accent-blue)]">
+                    #{item.tag} <span className="text-[var(--ink-faint)]">{item.count}</span>
+                  </button>
+                ))}
+              </InsightPanel>
+              <InsightPanel title="来源分布" empty="还没有来源。">
+                {sources.map((item) => (
+                  <button key={item.source} onClick={() => setSourceFilter(item.source as any)} className="rounded-full border border-[var(--paper-border)] bg-white px-3 py-1.5 text-xs text-[var(--ink-light)] hover:border-[var(--accent-blue)] hover:text-[var(--accent-blue)]">
+                    {platformBadge(item.source)} <span className="text-[var(--ink-faint)]">{item.count}</span>
+                  </button>
+                ))}
+              </InsightPanel>
+              <InsightPanel title="待处理" empty="没有需要处理的笔记。">
+                {attentionNotes.map((note) => (
+                  <button key={note.id} onClick={() => router.push(`/note/${note.id}`)} className="block w-full rounded-[8px] border border-[var(--paper-border)] bg-white px-3 py-2 text-left text-xs text-[var(--ink-light)] hover:bg-[var(--paper-soft)]">
+                    <span className={note.status === "failed" ? "text-red-500" : "text-[var(--gold)]"}>{note.status === "failed" ? "失败" : "处理中"}</span>
+                    <span className="ml-2">{(note.title || stripMarkdown(note.contentMd)).slice(0, 34)}</span>
+                  </button>
+                ))}
+              </InsightPanel>
+            </div>
+          )}
         </div>
 
         {loading ? (
@@ -349,6 +386,7 @@ export function MainWorkspace() {
                       onArchive={(e) => handleArchive(e, note.id)}
                       onDelete={(e) => handleDelete(e, note.id)}
                       onRestore={(e) => handleRestore(e, note.id)}
+                      onPermanentDelete={(e) => handlePermanentDelete(e, note.id)}
                       onRetryTranscribe={(e) => handleRetryTranscribe(e, note.id)}
                       retrying={retryingId === note.id}
                       inTrash={view === "trash"}
@@ -370,6 +408,7 @@ function NoteCard({
   onArchive,
   onDelete,
   onRestore,
+  onPermanentDelete,
   onRetryTranscribe,
   retrying,
   inTrash,
@@ -379,6 +418,7 @@ function NoteCard({
   onArchive: (e: React.MouseEvent) => void;
   onDelete: (e: React.MouseEvent) => void;
   onRestore: (e: React.MouseEvent) => void;
+  onPermanentDelete: (e: React.MouseEvent) => void;
   onRetryTranscribe: (e: React.MouseEvent) => void;
   retrying: boolean;
   inTrash: boolean;
@@ -492,12 +532,20 @@ function NoteCard({
                 打开
               </button>
               {inTrash ? (
-                <button
-                  onClick={(e) => onRestore(e as any)}
-                  className="rounded px-2 py-1 text-xs text-blue-600 transition-colors hover:bg-blue-50"
-                >
-                  恢复
-                </button>
+                <>
+                  <button
+                    onClick={(e) => onRestore(e as any)}
+                    className="rounded px-2 py-1 text-xs text-blue-600 transition-colors hover:bg-blue-50"
+                  >
+                    恢复
+                  </button>
+                  <button
+                    onClick={(e) => onPermanentDelete(e as any)}
+                    className="rounded px-2 py-1 text-xs text-red-500 transition-colors hover:bg-red-50"
+                  >
+                    永久删除
+                  </button>
+                </>
               ) : note.status === "inbox" && (
                 <button
                   onClick={(e) => onArchive(e as any)}
@@ -549,6 +597,18 @@ function StatCard({ label, value }: { label: string; value: number }) {
   );
 }
 
+function InsightPanel({ title, empty, children }: { title: string; empty: string; children: React.ReactNode }) {
+  const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children);
+  return (
+    <section className="rounded-[8px] border border-[var(--paper-border)] bg-white px-4 py-3">
+      <h3 className="text-xs font-medium text-[var(--ink)]">{title}</h3>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {hasChildren ? children : <span className="text-xs text-[var(--ink-faint)]">{empty}</span>}
+      </div>
+    </section>
+  );
+}
+
 function makeStats(notes: Note[]) {
   const tags = new Set<string>();
   let withAI = 0;
@@ -559,6 +619,28 @@ function makeStats(notes: Note[]) {
     for (const nt of note.tags || []) tags.add(nt.tag.fullPath);
   }
   return { withAI, needsAttention, tags: tags.size };
+}
+
+function getTopTags(notes: Note[]) {
+  const counts = new Map<string, number>();
+  for (const note of notes) {
+    for (const nt of note.tags || []) {
+      counts.set(nt.tag.fullPath, (counts.get(nt.tag.fullPath) || 0) + 1);
+    }
+  }
+  return Array.from(counts.entries())
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
+    .slice(0, 10);
+}
+
+function getSources(notes: Note[]) {
+  const counts = new Map<string, number>();
+  for (const note of notes) counts.set(note.type || "manual", (counts.get(note.type || "manual") || 0) + 1);
+  return Array.from(counts.entries())
+    .map(([source, count]) => ({ source, count }))
+    .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source))
+    .slice(0, 8);
 }
 
 function pickPlaceholder(): string {

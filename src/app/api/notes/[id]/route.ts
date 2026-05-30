@@ -90,7 +90,9 @@ export async function DELETE(
 ) {
   try {
     const userId = await getCurrentUserId();
-    const tagId = new URL(req.url).searchParams.get("tagId");
+    const url = new URL(req.url);
+    const tagId = url.searchParams.get("tagId");
+    const permanent = url.searchParams.get("permanent") === "true";
 
     if (tagId) {
       const note = await prisma.note.findFirst({
@@ -102,6 +104,18 @@ export async function DELETE(
       }
 
       await prisma.noteTag.deleteMany({ where: { noteId: params.id, tagId } });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (permanent) {
+      const note = await prisma.note.findFirst({
+        where: { id: params.id, userId, deletedAt: { not: null } },
+        select: { id: true },
+      });
+      if (!note) {
+        return NextResponse.json({ error: "Note not found in trash" }, { status: 404 });
+      }
+      await prisma.note.delete({ where: { id: params.id } });
       return NextResponse.json({ ok: true });
     }
 
