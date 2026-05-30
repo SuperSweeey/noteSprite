@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 
-type Tab = "spirit" | "model" | "transcribe" | "about";
+type Tab = "spirit" | "model" | "knowledge" | "transcribe" | "about";
 
 interface Provider {
   id: string;
@@ -41,6 +41,13 @@ interface Settings {
     ossBucketName: string;
     ossEndpoint: string;
     ffmpegPath: string;
+  };
+  knowledge: {
+    defaultSort: "updated" | "created";
+    autoAnalyze: boolean;
+    autoReport: boolean;
+    deleteMode: "trash" | "permanent";
+    autoImageOcr: boolean;
   };
 }
 
@@ -390,6 +397,14 @@ export default function SettingsPage() {
       data.spirit.learningPrompt = normalizeLearningPrompt(data.spirit);
       data.prompts = { chat: "", analysis: "", report: DEFAULT_REPORT_PROMPT, ...(data.prompts || {}) };
       if (!data.prompts.report || data.prompts.report.length < 120) data.prompts.report = DEFAULT_REPORT_PROMPT;
+      data.knowledge = {
+        defaultSort: "updated",
+        autoAnalyze: true,
+        autoReport: false,
+        deleteMode: "trash",
+        autoImageOcr: false,
+        ...(data.knowledge || {}),
+      };
       setSettings(data);
     }
   };
@@ -576,6 +591,7 @@ export default function SettingsPage() {
             {[
               { key: "spirit" as Tab, label: "你的 AI" },
               { key: "model" as Tab, label: "模型" },
+              { key: "knowledge" as Tab, label: "知识库" },
               { key: "transcribe" as Tab, label: "转录" },
               { key: "about" as Tab, label: "关于" },
             ].map((item) => (
@@ -719,6 +735,40 @@ export default function SettingsPage() {
             </section>
           )}
 
+          {tab === "knowledge" && (
+            <section className="space-y-5">
+              <div className="paper-card p-6">
+                <h2 className="text-lg font-semibold text-[var(--ink)]">知识库默认行为</h2>
+                <p className="mt-1 text-sm leading-6 text-[var(--ink-faint)]">这些设置会影响首页知识库、删除策略和后续图片/OCR 工作流。</p>
+                <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <label className="block">
+                    <span className="mb-1.5 block text-sm text-[var(--ink-light)]">默认排序</span>
+                    <select className="w-full rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none" value={settings.knowledge.defaultSort} onChange={(e) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, defaultSort: e.target.value as any } }))}>
+                      <option value="updated">最近更新优先</option>
+                      <option value="created">最近创建优先</option>
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="mb-1.5 block text-sm text-[var(--ink-light)]">删除策略</span>
+                    <select className="w-full rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none" value={settings.knowledge.deleteMode} onChange={(e) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, deleteMode: e.target.value as any } }))}>
+                      <option value="trash">先进入最近删除</option>
+                      <option value="permanent">直接永久删除</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              <div className="paper-card p-6">
+                <h2 className="text-lg font-semibold text-[var(--ink)]">自动整理</h2>
+                <div className="mt-4 space-y-3">
+                  <ToggleRow title="保存笔记后自动生成标题/摘要/关键词" desc="关闭后，笔记会先保持原样，后续再手动整理。" checked={settings.knowledge.autoAnalyze} onChange={(checked) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, autoAnalyze: checked } }))} />
+                  <ToggleRow title="转录成功后自动生成 AI 解读" desc="打开后会更像 Get 笔记，但会增加模型调用次数。" checked={settings.knowledge.autoReport} onChange={(checked) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, autoReport: checked } }))} />
+                  <ToggleRow title="图片上传后自动 OCR/多模态理解" desc="功能入口先保留；图片处理实现会在后续阶段接入。" checked={settings.knowledge.autoImageOcr} onChange={(checked) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, autoImageOcr: checked } }))} />
+                </div>
+              </div>
+            </section>
+          )}
+
           {tab === "transcribe" && (
             <section className="space-y-5">
               <div className="paper-card p-6">
@@ -844,6 +894,18 @@ function Field({ label, value, placeholder, onChange }: { label: string; value: 
     <label className="block">
       <span className="mb-1.5 block text-xs font-medium text-[var(--ink-light)]">{label}</span>
       <input className="w-full rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2.5 text-sm outline-none" placeholder={placeholder} value={value} onChange={(e) => onChange(e.target.value)} />
+    </label>
+  );
+}
+
+function ToggleRow({ title, desc, checked, onChange }: { title: string; desc: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="flex cursor-pointer items-center justify-between gap-4 rounded-[10px] border border-[var(--paper-border)] bg-white px-4 py-3">
+      <span>
+        <span className="block text-sm font-medium text-[var(--ink)]">{title}</span>
+        <span className="mt-1 block text-xs leading-5 text-[var(--ink-faint)]">{desc}</span>
+      </span>
+      <input type="checkbox" className="h-4 w-4 accent-[var(--accent-blue)]" checked={checked} onChange={(e) => onChange(e.target.checked)} />
     </label>
   );
 }

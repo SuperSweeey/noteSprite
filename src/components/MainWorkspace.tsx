@@ -20,6 +20,11 @@ interface Note {
   } | null;
 }
 
+interface RuntimeSettings {
+  defaultSort: "updated" | "created";
+  deleteMode: "trash" | "permanent";
+}
+
 function safeParse(value?: string | null): string[] {
   if (!value) return [];
   try {
@@ -48,9 +53,11 @@ export function MainWorkspace() {
   const [linkMsg, setLinkMsg] = useState("");
   const [justSaved, setJustSaved] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings>({ defaultSort: "updated", deleteMode: "trash" });
 
   const fetchNotes = useCallback(async () => {
     const params = new URLSearchParams({ limit: "80" });
+    params.set("sort", runtimeSettings.defaultSort);
     if (activeTag) params.set("tag", activeTag);
     if (query.trim()) params.set("search", query.trim());
     if (view === "trash") params.set("view", "trash");
@@ -61,7 +68,21 @@ export function MainWorkspace() {
     const data = await resp.json();
     setNotes(data.notes || []);
     setLoading(false);
-  }, [activeTag, query, view, statusFilter, sourceFilter, aiFilter]);
+  }, [activeTag, query, view, statusFilter, sourceFilter, aiFilter, runtimeSettings.defaultSort]);
+
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((resp) => resp.json())
+      .then((data) => {
+        if (data.knowledge) {
+          setRuntimeSettings({
+            defaultSort: data.knowledge.defaultSort || "updated",
+            deleteMode: data.knowledge.deleteMode || "trash",
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetchNotes();
@@ -125,8 +146,9 @@ export function MainWorkspace() {
 
   const handleDelete = async (e: React.MouseEvent, noteId: string) => {
     e.stopPropagation();
-    if (!confirm("确定把这页放进最近删除吗？")) return;
-    await fetch(`/api/notes/${noteId}`, { method: "DELETE" });
+    const permanent = runtimeSettings.deleteMode === "permanent";
+    if (!confirm(permanent ? "设置当前为直接永久删除，确定删除吗？" : "确定把这页放进最近删除吗？")) return;
+    await fetch(`/api/notes/${noteId}${permanent ? "?permanentNow=true" : ""}`, { method: "DELETE" });
     fetchNotes();
   };
 

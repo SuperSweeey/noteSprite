@@ -62,6 +62,7 @@ export default function NoteDetailPage() {
   const [saving, setSaving] = useState("");
   const [suggestedQuestion, setSuggestedQuestion] = useState("");
   const [reuseMsg, setReuseMsg] = useState("");
+  const [deleteMode, setDeleteMode] = useState<"trash" | "permanent">("trash");
 
   const noteId = params.id;
 
@@ -93,6 +94,13 @@ export default function NoteDetailPage() {
     setLoading(true);
     loadNote();
   }, [noteId]);
+
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((resp) => resp.json())
+      .then((data) => setDeleteMode(data.knowledge?.deleteMode || "trash"))
+      .catch(() => {});
+  }, []);
 
   const title = note?.title || note?.aiResult?.title || note?.contentMd?.slice(0, 100) || "";
   const summary = note?.aiResult?.summary || "";
@@ -257,8 +265,8 @@ export default function NoteDetailPage() {
   };
 
   const handleDelete = async () => {
-    if (!note || !confirm("把这页放进最近删除吗？")) return;
-    await fetch(`/api/notes/${note.id}`, { method: "DELETE" });
+    if (!note || !confirm(deleteMode === "permanent" ? "设置当前为直接永久删除，确定删除吗？" : "把这页放进最近删除吗？")) return;
+    await fetch(`/api/notes/${note.id}${deleteMode === "permanent" ? "?permanentNow=true" : ""}`, { method: "DELETE" });
     router.push("/");
   };
 

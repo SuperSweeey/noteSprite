@@ -93,6 +93,7 @@ export async function DELETE(
     const url = new URL(req.url);
     const tagId = url.searchParams.get("tagId");
     const permanent = url.searchParams.get("permanent") === "true";
+    const permanentNow = url.searchParams.get("permanentNow") === "true";
 
     if (tagId) {
       const note = await prisma.note.findFirst({
@@ -107,9 +108,9 @@ export async function DELETE(
       return NextResponse.json({ ok: true });
     }
 
-    if (permanent) {
+    if (permanent || permanentNow) {
       const note = await prisma.note.findFirst({
-        where: { id: params.id, userId, deletedAt: { not: null } },
+        where: permanent ? { id: params.id, userId, deletedAt: { not: null } } : { id: params.id, userId },
         select: { id: true },
       });
       if (!note) {

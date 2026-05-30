@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { parseTags, stripMarkdown } from "@/lib/tags";
 import { ensureTagHierarchy } from "@/lib/tags-db";
 import { analyzeNote } from "@/lib/ai";
-import { getAIConfig } from "@/lib/ai-config";
+import { getAIConfig, resolveSettings } from "@/lib/ai-config";
 
 function shouldSkipAIAnalysis(content: string) {
   return /\[失败\]|转写失败|转录失败/.test(content || "");
@@ -54,8 +54,11 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { settings: true } });
+    const settings = resolveSettings(user?.settings);
+
     // Step 4: trigger AI analysis in background (don't wait)
-    if (!shouldSkipAIAnalysis(content)) {
+    if (settings.knowledge.autoAnalyze && !shouldSkipAIAnalysis(content)) {
       runAIAnalysis(note.id, content);
     }
 
@@ -77,6 +80,7 @@ export async function GET(req: NextRequest) {
     const source = url.searchParams.get("source") || undefined;
     const hasAI = url.searchParams.get("hasAI") || undefined;
     const view = url.searchParams.get("view") || "active";
+    const sort = url.searchParams.get("sort") || undefined;
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 100);
     const offset = parseInt(url.searchParams.get("offset") || "0");
 
@@ -114,7 +118,7 @@ export async function GET(req: NextRequest) {
       prisma.note.findMany({
         where,
         include: { tags: { include: { tag: true } }, aiResult: true },
-        orderBy: { updatedAt: "desc" },
+        orderBy: { [sort === "created" ? "createdAt" : "updatedAt"]: "desc" },
         take: limit,
         skip: offset,
       }),

@@ -57,6 +57,7 @@ export async function PUT(req: NextRequest) {
       prompts: { ...DEFAULTS.prompts, ...existing.prompts },
       transcription: { ...DEFAULTS.transcription, ...existing.transcription },
       spirit: { ...DEFAULTS.spirit, ...existing.spirit },
+      knowledge: { ...DEFAULTS.knowledge, ...existing.knowledge },
     };
 
     if (body.providers) {
@@ -96,6 +97,15 @@ export async function PUT(req: NextRequest) {
         learningModeId: body.spirit.learningModeId ?? existing.spirit.learningModeId,
         learningPrompt: body.spirit.learningPrompt ?? existing.spirit.learningPrompt,
         prompt: body.spirit.prompt ?? existing.spirit.prompt,
+      };
+    }
+    if (body.knowledge) {
+      updated.knowledge = {
+        defaultSort: body.knowledge.defaultSort ?? existing.knowledge.defaultSort,
+        autoAnalyze: Boolean(body.knowledge.autoAnalyze),
+        autoReport: Boolean(body.knowledge.autoReport),
+        deleteMode: body.knowledge.deleteMode ?? existing.knowledge.deleteMode,
+        autoImageOcr: Boolean(body.knowledge.autoImageOcr),
       };
     }
 

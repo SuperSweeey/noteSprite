@@ -32,6 +32,14 @@ export interface SpiritSettings {
   prompt: string;
 }
 
+export interface KnowledgeSettings {
+  defaultSort: "updated" | "created";
+  autoAnalyze: boolean;
+  autoReport: boolean;
+  deleteMode: "trash" | "permanent";
+  autoImageOcr: boolean;
+}
+
 export interface LearningMode {
   id: string;
   name: string;
@@ -60,6 +68,7 @@ export interface UserSettings {
   };
   transcription: TranscriptionSettings;
   spirit: SpiritSettings;
+  knowledge: KnowledgeSettings;
 }
 
 export const SECRET_MASK = "••••";
@@ -80,6 +89,14 @@ const DEFAULT_TRANSCRIPTION: TranscriptionSettings = {
   ossBucketName: "",
   ossEndpoint: "",
   ffmpegPath: "",
+};
+
+const DEFAULT_KNOWLEDGE: KnowledgeSettings = {
+  defaultSort: "updated",
+  autoAnalyze: true,
+  autoReport: false,
+  deleteMode: "trash",
+  autoImageOcr: false,
 };
 
 export const LEARNING_MODES: LearningMode[] = [
@@ -378,6 +395,7 @@ export const DEFAULTS: UserSettings = {
   prompts: { chat: "", analysis: "", report: DEFAULT_REPORT_PROMPT },
   transcription: { ...DEFAULT_TRANSCRIPTION },
   spirit: { ...DEFAULT_SPIRIT },
+  knowledge: { ...DEFAULT_KNOWLEDGE },
 };
 
 export function isMaskedSecret(value?: string | null): boolean {
@@ -452,6 +470,7 @@ export function resolveSettings(raw?: string | null): UserSettings {
       report: cleanText(settings.prompts?.report, DEFAULT_REPORT_PROMPT),
     },
     transcription: { ...DEFAULTS.transcription, ...settings.transcription },
+    knowledge: { ...DEFAULTS.knowledge, ...settings.knowledge },
     spirit: {
       name: cleanSpiritName(rawSpirit.name),
       personaId: rawSpirit.personaId || DEFAULT_SPIRIT.personaId,
