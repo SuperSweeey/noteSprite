@@ -9,7 +9,7 @@ export function Sidebar() {
   const { greeting, sub } = getGreeting();
 
   return (
-    <aside className="flex min-h-screen w-[232px] flex-col border-r border-black/[0.06] bg-[rgba(251,251,253,0.78)] shadow-[1px_0_0_rgba(255,255,255,0.7)_inset] backdrop-blur-2xl">
+    <aside className="flex min-h-screen w-[232px] flex-col border-r border-black/[0.06] bg-[rgba(251,251,253,0.88)] shadow-[1px_0_0_rgba(255,255,255,0.75)_inset] backdrop-blur-2xl">
       <div className="px-5 pb-5 pt-6">
         <button onClick={() => router.push("/")} className="flex items-center gap-3 rounded-[14px] p-1 text-left transition-colors hover:bg-black/[0.035]">
           <XiaoAoMark size="md" variant="logo" />
@@ -43,9 +43,9 @@ export function Sidebar() {
         <button
           onClick={() => router.push("/settings")}
           onMouseEnter={() => router.prefetch("/settings")}
-          className="mt-1 flex w-full items-center gap-2 rounded-[12px] px-3 py-2.5 text-left text-[13px] text-[var(--ink-faint)] transition-colors hover:bg-black/[0.04] hover:text-[var(--ink-light)]"
+          className="mt-2 flex w-full items-center gap-2 rounded-[12px] border border-black/[0.06] bg-white px-3 py-2.5 text-left text-[13px] font-medium text-[var(--ink)] shadow-[0_10px_24px_rgba(15,23,42,0.05)] transition-colors hover:bg-black/[0.02]"
         >
-          <SidebarIcon name="settings" active={false} />
+          <SidebarIcon name="settings" active />
           <span>偏好设置</span>
         </button>
       </div>
@@ -86,7 +86,7 @@ function NavItem({
 type IconName = "today" | "library" | "inbox" | "spark" | "settings";
 
 function SidebarIcon({ name, active }: { name: IconName; active: boolean }) {
-  const stroke = active ? "currentColor" : "currentColor";
+  const stroke = "currentColor";
   const common = { fill: "none", stroke, strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
   return (
     <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-[8px] ${active ? "bg-[#eef4ff] text-[var(--accent-blue)]" : "text-[var(--ink-faint)]"}`}>

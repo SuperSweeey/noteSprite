@@ -98,6 +98,7 @@ export interface UserSettings {
     chat: Assignment;
     analysis: Assignment;
     report: Assignment;
+    vision: Assignment;
   };
   prompts: {
     chat: string;
@@ -415,6 +416,7 @@ export const DEFAULTS: UserSettings = {
     chat: { providerId: "default", model: "deepseek-v4-flash" },
     analysis: { providerId: "default", model: "deepseek-v4-flash" },
     report: { providerId: "default", model: "deepseek-v4-flash" },
+    vision: { providerId: "default", model: "qwen-vl-plus" },
   },
   prompts: { chat: "", analysis: "", report: DEFAULT_REPORT_PROMPT },
   transcription: { ...DEFAULT_TRANSCRIPTION },
@@ -599,7 +601,7 @@ export function resolveSettings(raw?: string | null): UserSettings {
 
 export async function getAIConfig(
   userId: string,
-  fn: "chat" | "analysis" | "report"
+  fn: "chat" | "analysis" | "report" | "vision"
 ): Promise<{ apiKey: string; baseUrl: string; model: string; prompt: string }> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   const resolved = resolveSettings(user?.settings);
@@ -614,7 +616,7 @@ export async function getAIConfig(
     apiKey: providerKey || envKey,
     baseUrl: usableText(provider.baseUrl) || process.env.DEEPSEEK_BASE_URL || DEFAULT_PROVIDER.baseUrl,
     model: assignment.model || envModel,
-    prompt: resolved.prompts?.[fn] || "",
+    prompt: fn === "vision" ? "" : resolved.prompts?.[fn] || "",
   };
 }
 

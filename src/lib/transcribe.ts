@@ -1,6 +1,6 @@
 import { exec } from "child_process";
 import { readFile } from "fs/promises";
-import { join } from "path";
+import { basename, join } from "path";
 import { promisify } from "util";
 import { formatFriendlyTranscriptionError } from "@/lib/transcription-errors";
 
@@ -169,5 +169,69 @@ export async function transcribeUrl(
       const { unlink } = await import("fs/promises");
       await unlink(cookiesPath).catch(() => {});
     }
+  }
+}
+
+export async function transcribeFile(
+  filePath: string,
+  displayName?: string,
+  extraEnv?: Record<string, string>
+): Promise<TranscribeResult> {
+  try {
+    const cmd = `python "${MAIN_PY}" --file "${filePath}"`;
+    const { stdout, stderr } = await execAsync(cmd, {
+      timeout: 900000,
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, ...extraEnv },
+    });
+
+    const taskIdMatch =
+      stdout.match(/\[([a-f0-9]{8})\]/) ||
+      stderr.match(/\[([a-f0-9]{8})\]/) ||
+      stdout.match(/task_id.*?([a-f0-9]{8})/) ||
+      stderr.match(/task_id.*?([a-f0-9]{8})/);
+    const taskId = taskIdMatch ? taskIdMatch[1] : "";
+
+    if (taskId) {
+      const transcriptPath = join(OUTPUT_DIR, `transcript_${taskId}.txt`);
+      try {
+        const text = await readFile(transcriptPath, "utf-8");
+        return { success: true, taskId, text, platform: "upload", url: displayName || basename(filePath), transcriptFile: transcriptPath };
+      } catch {
+        const previewMatch = stdout.match(/转录预览[\s\S]*?\n([\s\S]*?)\n\n/);
+        if (previewMatch) {
+          return { success: true, taskId, text: previewMatch[1].trim(), platform: "upload", url: displayName || basename(filePath) };
+        }
+      }
+    }
+
+    return { success: true, taskId, text: stdout, platform: "upload", url: displayName || basename(filePath) };
+  } catch (e: any) {
+    const stdout = e.stdout || "";
+    const stderr = e.stderr || "";
+    const failure = parseFailureOutput(stdout, stderr);
+    const taskIdMatch = stdout.match(/\[([a-f0-9]{8})\]/) || stderr.match(/\[([a-f0-9]{8})\]/);
+    const taskId = failure?.taskId || (taskIdMatch ? taskIdMatch[1] : "");
+
+    if (taskId) {
+      const transcriptPath = join(OUTPUT_DIR, `transcript_${taskId}.txt`);
+      try {
+        const text = await readFile(transcriptPath, "utf-8");
+        return { success: true, taskId, text, platform: "upload", url: displayName || basename(filePath) };
+      } catch {}
+    }
+
+    return {
+      success: false,
+      taskId,
+      error: formatPipelineError(
+        e.killed || e.signal === "SIGTERM"
+          ? "本地上传转录任务超过 15 分钟仍未完成，已自动停止。可以稍后重试，或换一个更短的音视频文件。"
+          : failure?.error || e.message.slice(0, 500),
+        failure?.stage
+      ),
+      platform: "upload",
+      url: displayName || basename(filePath),
+    };
   }
 }
