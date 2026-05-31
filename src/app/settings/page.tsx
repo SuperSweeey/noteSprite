@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
+import { DEFAULT_REPORT_PROMPT } from "@/lib/default-prompts";
 
 type Tab = "spirit" | "model" | "knowledge" | "transcribe" | "about";
 
@@ -41,6 +42,9 @@ interface Settings {
     ossBucketName: string;
     ossEndpoint: string;
     ffmpegPath: string;
+    enableTimestamps: boolean;
+    enableSpeakerDiarization: boolean;
+    speakerCount: number;
   };
   knowledge: {
     defaultSort: "updated" | "created";
@@ -338,29 +342,6 @@ function normalizeLearningPrompt(spirit: SpiritSettings) {
   return learningPromptFor(spirit.learningModeId);
 }
 
-const DEFAULT_REPORT_PROMPT = [
-  "你的任务不是写简短摘要，而是把用户的原文读完、拆开、重组为一篇可以替代原文阅读的完整解读。",
-  "请用中文输出 Markdown。如果用户选择了某种领学模式，也要把这种模式体现在解读方式里。",
-  "",
-  "输出结构必须包含：",
-  "## AI 先帮你读懂",
-  "用 3 到 5 句话说明这一页笔记到底在讲什么，以及为什么值得留下。",
-  "",
-  "## 核心内容",
-  "按主题拆成多个小标题。每个小标题下写出充分细节、关键数据、因果关系、背景和结论。",
-  "",
-  "## 关键判断",
-  "提炼这页笔记背后的判断、趋势、风险、矛盾或启发，不要只重复原文。",
-  "",
-  "## 可以带走的东西",
-  "列出可复用的观点、行动建议、写作素材或以后可追问的问题。",
-  "",
-  "## AI 的提醒",
-  "用一小段自然的话收尾，指出这页笔记还能和哪些旧想法连接。",
-  "",
-  "重要边界：优先依据用户笔记。笔记里没有的信息，要明确说暂时没在笔记里看到，不要编造。",
-].join("\n");
-
 function explainCheck(check: PreflightCheck) {
   if (check.ok) return "这一项已经可以工作。";
   const text = `${check.name} ${check.message}`;
@@ -397,6 +378,19 @@ export default function SettingsPage() {
       data.spirit.learningPrompt = normalizeLearningPrompt(data.spirit);
       data.prompts = { chat: "", analysis: "", report: DEFAULT_REPORT_PROMPT, ...(data.prompts || {}) };
       if (!data.prompts.report || data.prompts.report.length < 120) data.prompts.report = DEFAULT_REPORT_PROMPT;
+      data.transcription = {
+        cookies: "",
+        dashscopeApiKey: "",
+        ossAccessKeyId: "",
+        ossAccessKeySecret: "",
+        ossBucketName: "",
+        ossEndpoint: "",
+        ffmpegPath: "",
+        enableTimestamps: true,
+        enableSpeakerDiarization: true,
+        speakerCount: 0,
+        ...(data.transcription || {}),
+      };
       data.knowledge = {
         defaultSort: "updated",
         autoAnalyze: true,
@@ -794,7 +788,19 @@ export default function SettingsPage() {
                     <p className="mt-2 text-xs leading-5 text-[var(--ink-faint)]">去阿里云百炼 / DashScope 控制台创建 API Key。这里填的是给语音转写模型用的密钥。</p>
                   </section>
                   <section className="paper-card p-6">
-                    <StepHeader number="3" title="OSS：临时存放音频" desc="DashScope 需要能读取音频文件，所以程序会先把音频上传到 OSS，再生成临时签名链接。" />
+                    <StepHeader number="3" title="转录文本：时间戳与说话人" desc="DashScope 录音文件识别支持时间戳校准和说话人分离，开启后转录文本会更适合回看。" />
+                    <div className="mt-4 space-y-3">
+                      <ToggleRow title="显示时间戳" desc="在句子前显示类似 [00:00:03 - 00:00:12] 的时间范围。" checked={settings.transcription.enableTimestamps} onChange={(checked) => setSettings((current) => ({ ...current!, transcription: { ...current!.transcription, enableTimestamps: checked } }))} />
+                      <ToggleRow title="尝试区分说话人" desc="模型会自动判断不同说话人，并在文本中标注说话人编号。" checked={settings.transcription.enableSpeakerDiarization} onChange={(checked) => setSettings((current) => ({ ...current!, transcription: { ...current!.transcription, enableSpeakerDiarization: checked } }))} />
+                    </div>
+                    <label className="mt-4 block">
+                      <span className="mb-1.5 block text-xs font-medium text-[var(--ink-light)]">说话人数参考值</span>
+                      <input type="number" min="0" max="100" className="w-full rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2.5 text-sm outline-none" value={settings.transcription.speakerCount || 0} onChange={(e) => setSettings((current) => ({ ...current!, transcription: { ...current!.transcription, speakerCount: Math.max(0, Number(e.target.value) || 0) } }))} />
+                      <span className="mt-1 block text-xs leading-5 text-[var(--ink-faint)]">填 0 表示自动判断；如果你知道音频里有几个人，可以填 2 到 100。</span>
+                    </label>
+                  </section>
+                  <section className="paper-card p-6">
+                    <StepHeader number="4" title="OSS：临时存放音频" desc="DashScope 需要能读取音频文件，所以程序会先把音频上传到 OSS，再生成临时签名链接。" />
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                       <Field label="Bucket 名称" placeholder="douyin-transcribe" value={settings.transcription.ossBucketName} onChange={(value) => setSettings((current) => ({ ...current!, transcription: { ...current!.transcription, ossBucketName: value } }))} />
                       <Field label="Endpoint" placeholder="oss-cn-beijing.aliyuncs.com" value={settings.transcription.ossEndpoint} onChange={(value) => setSettings((current) => ({ ...current!, transcription: { ...current!.transcription, ossEndpoint: value } }))} />
@@ -802,7 +808,7 @@ export default function SettingsPage() {
                     <p className="mt-2 text-xs leading-5 text-[var(--ink-faint)]">如果 Bucket 地域是华北 2（北京），Endpoint 就填 oss-cn-beijing.aliyuncs.com。地域不同，Endpoint 也必须跟着变。</p>
                   </section>
                   <section className="paper-card p-6">
-                    <StepHeader number="4" title="RAM AccessKey：给程序上传权限" desc="AccessKey ID 和 Secret 必须是同一次创建出来的一对，Secret 忘了只能重新创建。" />
+                    <StepHeader number="5" title="RAM AccessKey：给程序上传权限" desc="AccessKey ID 和 Secret 必须是同一次创建出来的一对，Secret 忘了只能重新创建。" />
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                       <Field label="OSS AccessKey ID" placeholder="LTAI..." value={settings.transcription.ossAccessKeyId} onChange={(value) => setSettings((current) => ({ ...current!, transcription: { ...current!.transcription, ossAccessKeyId: value } }))} />
                       <Field label="OSS AccessKey Secret" placeholder="输入 Secret；保存后会隐藏" value={visibleSecret(settings.transcription.ossAccessKeySecret)} onChange={(value) => setSettings((current) => ({ ...current!, transcription: { ...current!.transcription, ossAccessKeySecret: value } }))} />
@@ -810,7 +816,7 @@ export default function SettingsPage() {
                     <p className="mt-2 text-xs leading-5 text-[var(--ink-faint)]">个人使用可先给这个 RAM 用户 AliyunOSSFullAccess。之后想收紧权限，再限制到当前 Bucket 的 PutObject / GetObject / DeleteObject。</p>
                   </section>
                   <section className="paper-card p-6">
-                    <StepHeader number="5" title="Cookies：可选" desc="部分平台需要登录态才能下载。可以先不填；如果抖音下载失败，再导出 Netscape cookies 粘贴到这里。" />
+                    <StepHeader number="6" title="Cookies：可选" desc="部分平台需要登录态才能下载。可以先不填；如果抖音下载失败，再导出 Netscape cookies 粘贴到这里。" />
                     <textarea className="mt-4 min-h-[130px] w-full rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-3 font-mono text-xs outline-none" placeholder="Netscape cookies，可先留空" value={settings.transcription.cookies} onChange={(e) => setSettings((current) => ({ ...current!, transcription: { ...current!.transcription, cookies: e.target.value } }))} />
                   </section>
                 </div>

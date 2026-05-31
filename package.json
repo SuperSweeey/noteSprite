@@ -1,11 +1,16 @@
 {
   "name": "noteflow",
-  "version": "0.1.0",
+  "version": "0.0.2",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "test:settings": "tsx scripts/settings-regression.ts",
+    "test:transcription-errors": "tsx scripts/transcription-errors-regression.ts",
+    "test:transcription-draft": "tsx scripts/transcription-draft-regression.ts",
+    "test:transcription-runtime": "tsx scripts/transcription-runtime-regression.ts",
+    "test:transcription-stale": "tsx scripts/transcription-stale-regression.ts",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "db:migrate": "prisma migrate dev",

@@ -22,6 +22,9 @@ class Config:
     notion_database_id: str = ""
     # FFmpeg路径（可选，如果在系统PATH中则不需要）
     ffmpeg_path: str = ""
+    transcribe_enable_timestamps: str = "1"
+    transcribe_enable_speaker_diarization: str = "1"
+    transcribe_speaker_count: str = "0"
     output_dir: str = "./output"
     zhipu_api_key: str = ""
     zhipu_api_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"

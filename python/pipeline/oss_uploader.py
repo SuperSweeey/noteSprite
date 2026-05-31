@@ -32,7 +32,8 @@ class OSSUploader:
         if not local_file.exists():
             raise FileNotFoundError(f"File does not exist: {local_file_path}")
 
-        object_name = f"douyin-transcribe/{uuid.uuid4()}.wav"
+        suffix = local_file.suffix.lower() or ".opus"
+        object_name = f"douyin-transcribe/{uuid.uuid4()}{suffix}"
         Logger.info(f"Uploading {local_file.name} to OSS...")
 
         self.bucket.put_object_from_file(object_name, str(local_file))

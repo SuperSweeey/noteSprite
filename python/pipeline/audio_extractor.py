@@ -33,6 +33,11 @@ class AudioExtractor:
         if not video_file.exists():
             raise FileNotFoundError(f"源文件不存在: {video_path}")
 
+        if video_file.suffix.lower() == ".opus":
+            file_size = video_file.stat().st_size / (1024 * 1024)
+            Logger.success(f"已是转录用 opus 音频，跳过二次提取: {video_file.name} ({file_size:.2f} MB)")
+            return str(video_file)
+
         if output_filename:
             output_file = self.output_dir / f"{output_filename}.opus"
         else:
@@ -42,9 +47,14 @@ class AudioExtractor:
 
         cmd = [
             self.ffmpeg_path,
+            "-hide_banner",
+            "-loglevel",
+            "error",
             "-i",
             str(video_file),
             "-vn",
+            "-ac",
+            "1",
             "-acodec",
             "libopus",
             "-ar",

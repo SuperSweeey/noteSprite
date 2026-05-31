@@ -14,6 +14,7 @@ interface NoteDetail {
   contentMd: string;
   type: string;
   sourceUrl?: string | null;
+  knowledgeBaseId?: string | null;
   status: string;
   createdAt: string;
   updatedAt: string;
@@ -63,6 +64,9 @@ export default function NoteDetailPage() {
   const [suggestedQuestion, setSuggestedQuestion] = useState("");
   const [reuseMsg, setReuseMsg] = useState("");
   const [deleteMode, setDeleteMode] = useState<"trash" | "permanent">("trash");
+  const [knowledgeBases, setKnowledgeBases] = useState<any[]>([]);
+  const [savingKb, setSavingKb] = useState(false);
+  const [retryingTranscribe, setRetryingTranscribe] = useState(false);
 
   const noteId = params.id;
 
@@ -75,6 +79,7 @@ export default function NoteDetailPage() {
       setNote(data);
       setEditContent(data.contentMd || "");
       setEditTitle(data.title || data.aiResult?.title || data.contentMd?.slice(0, 80) || "");
+      setTab(data.type === "manual" ? "content" : "spirit");
       if (data.aiResult?.actionItems?.includes("## ")) {
         setReport(data.aiResult.actionItems);
       } else if (data.aiResult?.summary && (data.aiResult.summary.includes("## ") || data.aiResult.summary.length > 420)) {
@@ -100,6 +105,10 @@ export default function NoteDetailPage() {
       .then((resp) => resp.json())
       .then((data) => setDeleteMode(data.knowledge?.deleteMode || "trash"))
       .catch(() => {});
+    fetch("/api/knowledge-bases")
+      .then((resp) => resp.json())
+      .then((data) => setKnowledgeBases(data.bases || []))
+      .catch(() => setKnowledgeBases([]));
   }, []);
 
   const title = note?.title || note?.aiResult?.title || note?.contentMd?.slice(0, 100) || "";
@@ -111,6 +120,7 @@ export default function NoteDetailPage() {
   const suggestedTags = useMemo(() => safeParse(note?.aiResult?.suggestedTags), [note?.aiResult?.suggestedTags]);
   const spiritQuestions = useMemo(() => safeParse(note?.aiResult?.reviewQuestions), [note?.aiResult?.reviewQuestions]);
   const hasSource = Boolean(note?.sourceUrl && note?.type !== "manual");
+  const isManualNote = note?.type === "manual";
   const isTranscribeFailed = Boolean(note && (note.status === "failed" || /\[失败\]|转写失败|转录失败/.test(note.contentMd || "")));
 
   const generateReport = async (force = false) => {
@@ -127,9 +137,6 @@ export default function NoteDetailPage() {
       body: JSON.stringify({
         noteId: note.id,
         force,
-        model: localStorage.getItem("nf_model") || undefined,
-        apiKey: localStorage.getItem("nf_api_key") || undefined,
-        baseUrl: localStorage.getItem("nf_base_url") || undefined,
       }),
     });
     const data = await resp.json();
@@ -143,12 +150,6 @@ export default function NoteDetailPage() {
     }
     setReportLoading(false);
   };
-
-  useEffect(() => {
-    if (!note?.id || report || reportLoading) return;
-    if (isTranscribeFailed) return;
-    generateReport(false);
-  }, [note?.id, isTranscribeFailed]);
 
   const patchNote = async (body: Record<string, unknown>) => {
     if (!note) return null;
@@ -270,13 +271,66 @@ export default function NoteDetailPage() {
     router.push("/");
   };
 
+  const handleKnowledgeBaseChange = async (knowledgeBaseId: string) => {
+    if (!note) return;
+    setSavingKb(true);
+    await patchNote({ knowledgeBaseId: knowledgeBaseId || null });
+    setSavingKb(false);
+  };
+
+  const handleRetryTranscribe = async () => {
+    if (!note?.id || retryingTranscribe) return;
+    setRetryingTranscribe(true);
+    setReportError("");
+    const resp = await fetch("/api/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteId: note.id }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      setReportError(data.error || "重新转录启动失败，请到设置-转录里检测管线。");
+    }
+    await loadNote();
+    setRetryingTranscribe(false);
+  };
+
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[var(--paper-bg)]">
-        <div className="flex items-center gap-3 rounded-[8px] border border-[var(--paper-border)] bg-white px-5 py-4">
-          <span className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent-blue)] border-t-transparent" />
-          <span className="text-sm text-[var(--ink-faint)]">AI 正在翻到这一页...</span>
-        </div>
+      <div className="flex h-screen overflow-hidden bg-[var(--paper-bg)]">
+        <Sidebar />
+        <main className="flex-1 overflow-hidden">
+          <div className="mx-auto max-w-[980px] px-7 py-5">
+            <div className="mb-4 flex items-center justify-between text-sm">
+              <div className="h-5 w-20 animate-pulse rounded-full bg-white" />
+              <div className="h-5 w-44 animate-pulse rounded-full bg-white" />
+            </div>
+            <section className="rounded-[8px] border border-[var(--paper-border)] bg-white px-7 py-6 shadow-[0_20px_50px_rgba(15,23,42,0.04)]">
+              <div className="h-9 w-2/3 animate-pulse rounded-full bg-[var(--paper-soft)]" />
+              <div className="mt-5 flex gap-2">
+                <div className="h-7 w-24 animate-pulse rounded-full bg-[var(--paper-soft)]" />
+                <div className="h-7 w-28 animate-pulse rounded-full bg-[var(--paper-soft)]" />
+                <div className="h-7 w-32 animate-pulse rounded-full bg-[var(--paper-soft)]" />
+              </div>
+            </section>
+            <div className="mt-5 flex gap-7 border-b border-[var(--paper-border)] py-2">
+              <div className="h-6 w-20 animate-pulse rounded-full bg-white" />
+              <div className="h-6 w-20 animate-pulse rounded-full bg-white" />
+              <div className="h-6 w-20 animate-pulse rounded-full bg-white" />
+            </div>
+            <section className="mt-5 rounded-[8px] border border-[var(--paper-border)] bg-white px-8 py-7">
+              <div className="flex items-center gap-3 text-sm text-[var(--ink-faint)]">
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent-blue)] border-t-transparent" />
+                AI 正在翻到这一页...
+              </div>
+              <div className="mt-8 space-y-4">
+                <div className="h-4 w-full animate-pulse rounded-full bg-[var(--paper-soft)]" />
+                <div className="h-4 w-11/12 animate-pulse rounded-full bg-[var(--paper-soft)]" />
+                <div className="h-4 w-4/5 animate-pulse rounded-full bg-[var(--paper-soft)]" />
+              </div>
+            </section>
+          </div>
+        </main>
       </div>
     );
   }
@@ -350,7 +404,12 @@ export default function NoteDetailPage() {
             <div className="mt-4 flex flex-wrap items-center gap-2">
               {hasSource && (
                 <span className="rounded-full bg-blue-50 px-3 py-1 text-sm text-[var(--accent-blue)]">
-                  AI 链接笔记 · {platformLabel(note.type)}
+                  外部资料 · {platformLabel(note.type)}
+                </span>
+              )}
+              {isManualNote && (
+                <span className="rounded-full bg-[var(--paper-soft)] px-3 py-1 text-sm text-[var(--ink-light)]">
+                  笔记输入
                 </span>
               )}
               {note.tags.map((nt) => (
@@ -397,13 +456,25 @@ export default function NoteDetailPage() {
                   + 智能标签 #{tag}
                 </button>
               ))}
+              <select
+                className="rounded-full border border-[var(--paper-border)] bg-white px-3 py-1 text-sm text-[var(--ink-light)] outline-none"
+                value={note.knowledgeBaseId || ""}
+                onChange={(e) => handleKnowledgeBaseChange(e.target.value)}
+                disabled={savingKb}
+                title="归入知识库"
+              >
+                <option value="">未归入知识库</option>
+                {knowledgeBases.map((base) => (
+                  <option key={base.id} value={base.id}>{base.name}</option>
+                ))}
+              </select>
             </div>
           </section>
 
           <div className="sticky top-0 z-10 mb-5 flex items-center gap-7 border-b border-[var(--paper-border)] bg-[var(--paper-bg)]/95 py-2 backdrop-blur">
             {[
-              { key: "spirit" as Tab, label: "AI 解读" },
-              { key: "content" as Tab, label: "原文" },
+              { key: "spirit" as Tab, label: isManualNote ? "和 AI 讨论" : "AI 解读" },
+              { key: "content" as Tab, label: isManualNote ? "我的记录" : "原文" },
               { key: "source" as Tab, label: "链接原文", hide: !hasSource },
               { key: "append" as Tab, label: "追加笔记" },
             ]
@@ -430,7 +501,7 @@ export default function NoteDetailPage() {
                   <div className="flex items-center gap-3">
                     <div>
                       <h2 className="text-xl font-bold text-[var(--ink)]">AI 解读</h2>
-                      <p className="mt-1 text-sm text-[var(--ink-faint)]">这部分应该能替代你重新读一遍原文。</p>
+                      <p className="mt-1 text-sm text-[var(--ink-faint)]">{isManualNote ? "自己的想法以记录和修改为主，AI 可以在侧边陪你讨论。" : "这部分应该能替代你重新读一遍原文。"}</p>
                     </div>
                   </div>
                   <button
@@ -438,7 +509,7 @@ export default function NoteDetailPage() {
                     disabled={reportLoading || isTranscribeFailed}
                     className="rounded-lg border border-[var(--paper-border)] px-3 py-2 text-sm text-[var(--ink-light)] hover:bg-[var(--paper-soft)] disabled:opacity-40"
                   >
-                    {isTranscribeFailed ? "等待重新转录" : reportLoading ? "AI 正在读" : "重新解读"}
+                    {isManualNote ? "整理想法" : isTranscribeFailed ? "等待重新转录" : reportLoading ? "AI 正在读" : "重新解读"}
                   </button>
                 </div>
 
@@ -465,7 +536,19 @@ export default function NoteDetailPage() {
 
                 {isTranscribeFailed ? (
                   <div className="rounded-[8px] border border-red-100 bg-red-50 px-5 py-4 text-sm leading-6 text-red-700">
-                    这条笔记转写失败了，AI 不会解读失败提示文本。请先回到列表点“重新转录”，或切到“原文”手动补充有效内容后再解读。
+                    <p>这条笔记转写失败了，AI 不会解读失败提示文本。</p>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={handleRetryTranscribe}
+                        disabled={retryingTranscribe}
+                        className="rounded-lg bg-red-600 px-3 py-2 text-sm text-white disabled:opacity-50"
+                      >
+                        {retryingTranscribe ? "重新转录中" : "重新转录"}
+                      </button>
+                      <button onClick={() => setTab("content")} className="rounded-lg border border-red-200 px-3 py-2 text-sm text-red-700 hover:bg-white">
+                        编辑原文
+                      </button>
+                    </div>
                   </div>
                 ) : reportLoading ? (
                   <div className="flex flex-col items-center gap-3 py-16 text-center">

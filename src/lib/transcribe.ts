@@ -2,6 +2,7 @@ import { exec } from "child_process";
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { promisify } from "util";
+import { formatFriendlyTranscriptionError } from "@/lib/transcription-errors";
 
 const execAsync = promisify(exec);
 
@@ -62,13 +63,13 @@ function formatPipelineError(error: string, stage?: string): string {
   if (error.includes("InvalidApiKey") || error.includes("Invalid API-key")) {
     return `${prefix}${error}\n\n建议：检查转录设置里的 DashScope API Key。这里要填阿里云百炼/DashScope 的模型 API Key，不是 OSS AccessKey ID，也不是 OSS AccessKey Secret。`;
   }
-  if (error.includes("AccessDenied") || error.includes("OSS") || error.includes("403")) {
-    return `${prefix}${error}\n\n建议：检查 OSS 的 AccessKey、Bucket、Endpoint 是否匹配，以及该 AccessKey 是否有 PutObject/GetObject/DeleteObject 权限。`;
+  if (error.includes("SignatureDoesNotMatch") || error.includes("AccessDenied") || error.includes("OSS") || error.includes("403")) {
+    return formatFriendlyTranscriptionError(error, stage);
   }
   if (error.includes("cookies") || error.includes("登录")) {
     return `${prefix}${error}\n\n建议：更新平台 cookies 后再试。`;
   }
-  return `${prefix}${error}`;
+  return formatFriendlyTranscriptionError(error, stage) || `${prefix}${error}`;
 }
 
 export function extractUrl(text: string): { url: string; title?: string } {
@@ -110,8 +111,8 @@ export async function transcribeUrl(
     if (cookiesPath) env.COOKIES_PATH = cookiesPath;
 
     const { stdout, stderr } = await execAsync(cmd, {
-      timeout: 300000,
-      maxBuffer: 1024 * 1024,
+      timeout: 900000,
+      maxBuffer: 4 * 1024 * 1024,
       env,
     });
 
@@ -154,7 +155,12 @@ export async function transcribeUrl(
     return {
       success: false,
       taskId,
-      error: formatPipelineError(failure?.error || e.message.slice(0, 500), failure?.stage),
+      error: formatPipelineError(
+        e.killed || e.signal === "SIGTERM"
+          ? "本地转录任务超过 15 分钟仍未完成，已自动停止。可以稍后重新转录，或换一个更短的视频链接。"
+          : failure?.error || e.message.slice(0, 500),
+        failure?.stage
+      ),
       platform: failure?.platform || detected,
       url: failure?.url || url,
     };

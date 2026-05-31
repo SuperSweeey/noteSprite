@@ -3,7 +3,7 @@ import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { parseTags, stripMarkdown } from "@/lib/tags";
 import { analyzeNote } from "@/lib/ai";
-import { getAIConfig, getTranscriptionConfig, buildTranscriptionEnv } from "@/lib/ai-config";
+import { buildSpiritPrompt, getAIConfig, getSpiritConfig, getTranscriptionConfig, buildTranscriptionEnv, resolveSettings } from "@/lib/ai-config";
 import { transcribeUrl, detectPlatform, extractUrl } from "@/lib/transcribe";
 import { runTranscriptionPreflight } from "@/lib/transcription-preflight";
 
@@ -92,8 +92,12 @@ export async function POST(req: NextRequest) {
 
 async function runTranscription(noteId: string, url: string, userId: string, platform: string) {
   const analysisConfig = await getAIConfig(userId, "analysis");
+  const reportConfig = await getAIConfig(userId, "report");
+  const spirit = await getSpiritConfig(userId);
   const transcriptionConfig = await getTranscriptionConfig(userId);
   const extraEnv = buildTranscriptionEnv(transcriptionConfig);
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { settings: true } });
+  const settings = resolveSettings(user?.settings);
 
   await prisma.note.update({
     where: { id: noteId },
@@ -126,8 +130,7 @@ async function runTranscription(noteId: string, url: string, userId: string, pla
         model: analysisConfig.model || undefined,
       };
       const analysis = await analyzeNote(cleanText, analysisOverrides).catch(() => null);
-      const fallbackTitle = cleanText.split("\n").find((line) => line.trim().length > 2)?.trim().slice(0, 20) || "";
-      const shortTitle = analysis?.title || fallbackTitle || `${platform} 转写`;
+      const shortTitle = analysis?.title?.trim() || buildFallbackTitle(platform, url);
       const fullContent = `# ${shortTitle}\n\n**来源：** ${url}\n**平台：** ${platform}\n\n---\n\n${cleanText}`;
 
       const tagPaths = parseTags(fullContent);
@@ -158,15 +161,28 @@ async function runTranscription(noteId: string, url: string, userId: string, pla
         });
       }
 
-      if (analysis) {
+      const report = settings.knowledge.autoReport
+        ? await generateDeepReport(cleanText, {
+            apiKey: reportConfig.apiKey,
+            baseUrl: reportConfig.baseUrl,
+            model: reportConfig.model,
+            prompt: buildSpiritPrompt(spirit, reportConfig.prompt),
+          }).catch((e) => {
+            console.error(`[AI] Auto report failed for note ${noteId}:`, e);
+            return "";
+          })
+        : "";
+
+      if (analysis || report) {
         await prisma.aIResult.create({
           data: {
             noteId,
-            model: analysisConfig.model || "deepseek-v4-flash",
-            summary: analysis.summary,
-            keyPoints: JSON.stringify(analysis.keyPoints),
-            keywords: JSON.stringify(analysis.keywords),
-            suggestedTags: JSON.stringify(analysis.suggestedTags),
+            model: report ? reportConfig.model || analysisConfig.model || "deepseek-v4-flash" : analysisConfig.model || "deepseek-v4-flash",
+            summary: analysis?.summary || "",
+            keyPoints: JSON.stringify(analysis?.keyPoints || []),
+            keywords: JSON.stringify(analysis?.keywords || []),
+            suggestedTags: JSON.stringify(analysis?.suggestedTags || []),
+            actionItems: report,
           },
         }).catch((e) => console.error(`[AI] Save AIResult failed for note ${noteId}:`, e));
       }
@@ -219,4 +235,47 @@ async function ensureTag(userId: string, fullPath: string): Promise<string> {
     }
   }
   return leafId!;
+}
+
+function buildFallbackTitle(platform: string, url: string) {
+  const today = new Date().toISOString().slice(0, 10);
+  let host = "";
+  try {
+    host = new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    host = "";
+  }
+  const source = platform || host || "外部资料";
+  return `${source} 转录笔记 ${today}`;
+}
+
+async function generateDeepReport(
+  content: string,
+  config: { apiKey: string; baseUrl: string; model: string; prompt: string }
+) {
+  if (!config.apiKey) return "";
+  const resp = await fetch(`${config.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` },
+    body: JSON.stringify({
+      model: config.model,
+      messages: [
+        { role: "system", content: config.prompt },
+        {
+          role: "user",
+          content: `请完整解读这条外部资料转录笔记。解读稿要能替代原文阅读。\n\n笔记原文：\n${content.slice(0, 12000)}`,
+        },
+      ],
+      max_tokens: 3000,
+      temperature: 0.45,
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`HTTP ${resp.status}: ${text.slice(0, 300)}`);
+  }
+
+  const json = await resp.json();
+  return String(json.choices?.[0]?.message?.content || "").trim();
 }

@@ -69,20 +69,18 @@ def download(url, output_dir, task_id, cookies_path=None, audio_only=True):
     if not ffmpeg_path:
         ffmpeg_path = "ffmpeg"
 
+    if audio_only:
+        out_path = output_dir / f"bilibili_audio_{task_id}.opus"
+        return run_yt_dlp_download("B站", url, out_path, cookies_path=cookies_path, audio_only=True)
+
     try:
         result, new_files = _try_youget_download(url, output_dir, cookies_path)
     except Exception as e:
         print(f"[WARN] you-get 失败，切换到 yt-dlp: {e}")
         out_path = output_dir / f"bilibili_{task_id}.mp4"
         if audio_only:
-            out_path = output_dir / f"bilibili_audio_{task_id}.m4a"
-            cmd = ["yt-dlp", "-f", "bestaudio", "-o", str(out_path), url]
-            if cookies_path:
-                cmd += ["--cookies", str(cookies_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode != 0:
-                raise RuntimeError(f"yt-dlp 音频下载失败: {result.stderr.strip()}")
-            return str(out_path)
+            out_path = output_dir / f"bilibili_audio_{task_id}.opus"
+            return run_yt_dlp_download("B站", url, out_path, cookies_path=cookies_path, audio_only=True)
         return run_yt_dlp_download("B站", url, out_path, cookies_path=cookies_path)
 
     video_parts = [f for f in new_files if "[00]" in f.name]

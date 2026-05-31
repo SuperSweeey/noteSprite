@@ -3,6 +3,7 @@ import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { parseTags, stripMarkdown } from "@/lib/tags";
 import { ensureTagHierarchy } from "@/lib/tags-db";
+import { markStaleTranscriptions } from "@/lib/transcription-jobs";
 
 export async function GET(
   req: NextRequest,
@@ -10,6 +11,7 @@ export async function GET(
 ) {
   try {
     const userId = await getCurrentUserId();
+    await markStaleTranscriptions(userId);
     const note = await prisma.note.findFirst({
       where: { id: params.id, userId, deletedAt: null },
       include: {

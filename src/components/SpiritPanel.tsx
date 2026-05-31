@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { MarkdownView } from "@/components/MarkdownView";
 import { XiaoAoMark } from "@/components/XiaoAoMark";
+import { stripMarkdown } from "@/lib/tags";
 
 const prompts = [
   "我看到有些想法正在慢慢连起来。等你愿意时，我们可以把它们串成一个主题。",
@@ -19,7 +20,7 @@ interface SpiritPanelProps {
 }
 
 export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed }: SpiritPanelProps) {
-  const [closed, setClosed] = useState(false);
+  const [closed, setClosed] = useState(true);
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -27,8 +28,15 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<any[]>([]);
   const [showConvList, setShowConvList] = useState(false);
+  const [showMentionPicker, setShowMentionPicker] = useState(false);
+  const [mentionTab, setMentionTab] = useState<"kb" | "note">("kb");
+  const [mentionQuery, setMentionQuery] = useState("");
+  const [bases, setBases] = useState<any[]>([]);
+  const [candidateNotes, setCandidateNotes] = useState<any[]>([]);
+  const [contextRefs, setContextRefs] = useState<{ type: "knowledgeBase" | "note"; id: string; label: string }[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
   const lastPromptRef = useRef<Date>(new Date());
+  const streamingRef = useRef(false);
 
   const loadConversations = () => {
     fetch("/api/ai/chat?list=1")
@@ -38,27 +46,40 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
   };
 
   useEffect(() => {
+    if (closed) return;
     loadConversations();
-  }, []);
+    fetch("/api/knowledge-bases")
+      .then((r) => r.json())
+      .then((d) => setBases(d.bases || []))
+      .catch(() => setBases([]));
+    fetch("/api/notes?limit=40&sort=updated&compact=1")
+      .then((r) => r.json())
+      .then((d) => setCandidateNotes(d.notes || []))
+      .catch(() => setCandidateNotes([]));
+  }, [closed]);
 
   useEffect(() => {
+    if (closed) return;
     if (!conversationId) {
       setMessages([]);
       return;
     }
+    if (streamingRef.current) return;
     fetch(`/api/ai/chat?conversationId=${conversationId}`)
       .then((r) => r.json())
       .then((d) => setMessages(d.messages || []))
       .catch(() => setMessages([]));
-  }, [conversationId]);
+  }, [conversationId, closed]);
 
   useEffect(() => {
     if (!initialQuestion) return;
+    setClosed(false);
     setInput(initialQuestion);
     onInitialQuestionConsumed?.();
   }, [initialQuestion, onInitialQuestionConsumed]);
 
   useEffect(() => {
+    if (closed) return;
     const timer = setInterval(() => {
       const elapsed = (Date.now() - lastPromptRef.current.getTime()) / 60000;
       if (elapsed >= 5 + Math.random() * 4) {
@@ -68,7 +89,7 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
       }
     }, 60000);
     return () => clearInterval(timer);
-  }, []);
+  }, [closed]);
 
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: "smooth" });
@@ -77,27 +98,25 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
   const send = async (overrideQuestion?: string) => {
     const question = (overrideQuestion ?? input).trim();
     if (!question || loading) return;
-    setMessages((m) => [...m, { role: "user", content: question }]);
+    const refs = contextRefs;
+    const refText = refs.map((ref) => `@${ref.label}`).join(" ");
+    const displayQuestion = refText ? `${refText}\n${question}` : question;
+    setMessages((m) => [...m, { role: "user", content: displayQuestion }, { role: "assistant", content: "" }]);
     setInput("");
+    setContextRefs([]);
+    setShowMentionPicker(false);
     setLoading(true);
+    streamingRef.current = true;
 
     try {
-      const model = localStorage.getItem("nf_model") || undefined;
-      const apiKey = localStorage.getItem("nf_api_key") || undefined;
-      const baseUrl = localStorage.getItem("nf_base_url") || undefined;
-      const prompt = localStorage.getItem("nf_prompt") || undefined;
-
       const resp = await fetch("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question,
           noteId: noteId || null,
+          contextRefs: refs,
           conversationId: conversationId || null,
-          model,
-          apiKey,
-          baseUrl,
-          prompt,
           stream: true,
         }),
       });
@@ -105,16 +124,16 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
       if (!resp.ok || resp.headers.get("content-type")?.includes("application/json")) {
         const data = await resp.json();
         if (data.conversationId) setConversationId(data.conversationId);
-        setMessages((m) => [...m, { role: "assistant", content: data.answer || "我刚才走神了一下，我们再试一次。" }]);
+        setMessages((m) => replaceLastAssistant(m, data.answer || "我刚才走神了一下，我们再试一次。"));
         loadConversations();
         setLoading(false);
+        streamingRef.current = false;
         return;
       }
 
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
       let content = "";
-      setMessages((m) => [...m, { role: "assistant", content: "" }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -127,34 +146,23 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
             const json = JSON.parse(payload);
             if (json.content) {
               content += json.content;
-              setMessages((m) => {
-                const updated = [...m];
-                updated[updated.length - 1] = { role: "assistant", content };
-                return updated;
-              });
+              setMessages((m) => replaceLastAssistant(m, content));
             }
             if (json.conversationId) {
               setConversationId(json.conversationId);
               loadConversations();
             }
             if (json.error) {
-              setMessages((m) => {
-                const updated = [...m];
-                updated[updated.length - 1] = { role: "assistant", content: content || json.error };
-                return updated;
-              });
+              setMessages((m) => replaceLastAssistant(m, content || json.error));
             }
           } catch {}
         });
       }
     } catch {
-      setMessages((m) => {
-        const updated = [...m];
-        updated[updated.length - 1] = { role: "assistant", content: "我这里刚才晃了一下，我们再试一次。" };
-        return updated;
-      });
+      setMessages((m) => replaceLastAssistant(m, "我这里刚才晃了一下，我们再试一次。"));
     } finally {
       setLoading(false);
+      streamingRef.current = false;
     }
   };
 
@@ -178,18 +186,40 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
     loadConversations();
   };
 
+  const addContextRef = (type: "knowledgeBase" | "note", id: string, label: string) => {
+    setContextRefs((current) => {
+      if (current.some((item) => item.type === type && item.id === id)) return current;
+      return [...current, { type, id, label }];
+    });
+    setShowMentionPicker(false);
+    setMentionQuery("");
+  };
+
+  const filteredBases = bases.filter((base) => base.name?.toLowerCase().includes(mentionQuery.toLowerCase()));
+  const filteredNotes = candidateNotes.filter((note) => {
+    const title = note.title || stripMarkdown(note.contentMd || "").slice(0, 60);
+    return title.toLowerCase().includes(mentionQuery.toLowerCase());
+  });
+
   if (closed) {
     return (
-      <aside className="flex w-12 flex-col items-center border-l border-[var(--paper-border)] bg-[var(--paper-sidebar)]/70 pt-4 backdrop-blur-md">
-        <button onClick={() => setClosed(false)} className="rounded-full p-1 transition-colors hover:bg-white/50" title="AI">
+      <button
+        onClick={() => setClosed(false)}
+        className="fixed right-6 top-6 z-30 flex h-11 w-11 items-center justify-center rounded-full border border-white/80 bg-white/82 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:bg-white hover:shadow-[0_22px_60px_rgba(15,23,42,0.16)]"
+        title="打开 AI"
+      >
+        <span className="absolute -left-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#1d1d1f] text-[12px] text-white shadow-sm">
+          ↗
+        </span>
+        <span className="rounded-full bg-white">
           <XiaoAoMark size="sm" variant="logo" />
-        </button>
-      </aside>
+        </span>
+      </button>
     );
   }
 
   return (
-    <aside className="flex min-h-screen w-[340px] flex-col border-l border-[var(--paper-border)] bg-[var(--paper-sidebar)]/82 backdrop-blur-xl">
+    <aside className="fixed inset-y-0 right-0 z-40 flex w-[min(92vw,360px)] flex-col border-l border-[var(--paper-border)] bg-[var(--paper-sidebar)]/92 shadow-[-26px_0_80px_rgba(15,23,42,0.12)] backdrop-blur-xl md:relative md:inset-auto md:h-screen md:w-[360px] md:shrink-0 md:shadow-none">
       <div className="flex items-center justify-between border-b border-[var(--paper-border)] px-4 py-3">
         <div className="flex min-w-0 items-center gap-2">
           <XiaoAoMark size="sm" variant="logo" />
@@ -310,7 +340,67 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
       </div>
 
       <div className="border-t border-[var(--paper-border)] p-3">
+        {contextRefs.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {contextRefs.map((ref) => (
+              <button
+                key={`${ref.type}-${ref.id}`}
+                onClick={() => setContextRefs((current) => current.filter((item) => item !== ref))}
+                className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] text-[var(--accent-blue)] ring-1 ring-[var(--paper-border)]"
+                title="移除引用"
+              >
+                @{ref.label} ×
+              </button>
+            ))}
+          </div>
+        )}
+        {showMentionPicker && (
+          <div className="mb-2 rounded-[12px] border border-[var(--paper-border)] bg-white/95 p-2 shadow-[0_18px_50px_rgba(15,23,42,0.12)]">
+            <div className="mb-2 flex gap-1 rounded-[8px] bg-[var(--paper-bg)] p-1">
+              <button onClick={() => setMentionTab("kb")} className={mentionTabClass(mentionTab === "kb")}>知识库</button>
+              <button onClick={() => setMentionTab("note")} className={mentionTabClass(mentionTab === "note")}>笔记</button>
+            </div>
+            <input
+              className="mb-2 w-full rounded-[8px] border border-[var(--paper-border)] bg-white px-3 py-2 text-xs outline-none"
+              placeholder="搜索要引用的内容"
+              value={mentionQuery}
+              onChange={(e) => setMentionQuery(e.target.value)}
+              autoFocus
+            />
+            <div className="max-h-[190px] space-y-1 overflow-y-auto">
+              {mentionTab === "kb" ? (
+                filteredBases.length === 0 ? (
+                  <p className="px-2 py-3 text-center text-xs text-[var(--ink-faint)]">没有找到知识库</p>
+                ) : filteredBases.map((base) => (
+                  <button key={base.id} onClick={() => addContextRef("knowledgeBase", base.id, base.name)} className="w-full rounded-[8px] px-2 py-2 text-left hover:bg-[#edf3ff]">
+                    <span className="block truncate text-xs font-medium text-[var(--ink)]">{base.icon || "◌"} {base.name}</span>
+                    <span className="block truncate text-[11px] text-[var(--ink-faint)]">{base._count?.notes || 0} 条笔记 · {base.description || "暂无描述"}</span>
+                  </button>
+                ))
+              ) : (
+                filteredNotes.length === 0 ? (
+                  <p className="px-2 py-3 text-center text-xs text-[var(--ink-faint)]">没有找到笔记</p>
+                ) : filteredNotes.map((note) => {
+                  const title = note.title || stripMarkdown(note.contentMd || "").slice(0, 40) || "未命名笔记";
+                  return (
+                    <button key={note.id} onClick={() => addContextRef("note", note.id, title)} className="w-full rounded-[8px] px-2 py-2 text-left hover:bg-[#edf3ff]">
+                      <span className="block truncate text-xs font-medium text-[var(--ink)]">{title}</span>
+                      <span className="block truncate text-[11px] text-[var(--ink-faint)]">{stripMarkdown(note.contentMd || "").slice(0, 72)}</span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
         <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setShowMentionPicker((value) => !value)}
+            className="flex h-9 w-9 items-center justify-center rounded-[8px] border border-white bg-white/78 text-sm font-medium text-[var(--accent-blue)] transition-colors hover:bg-white"
+            title="引用知识库或笔记"
+          >
+            @
+          </button>
           <input
             className="flex-1 rounded-[8px] border border-white bg-white/78 px-3 py-2.5 text-sm text-[var(--ink)] outline-none"
             style={{ fontFamily: "inherit" }}
@@ -334,4 +424,21 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
       </div>
     </aside>
   );
+}
+
+function mentionTabClass(active: boolean) {
+  return `flex-1 rounded-[7px] px-2 py-1.5 text-xs transition-colors ${
+    active ? "bg-white text-[var(--ink)] shadow-sm" : "text-[var(--ink-faint)]"
+  }`;
+}
+
+function replaceLastAssistant(messages: { role: string; content: string }[], content: string) {
+  const updated = [...messages];
+  for (let index = updated.length - 1; index >= 0; index -= 1) {
+    if (updated[index].role === "assistant") {
+      updated[index] = { role: "assistant", content };
+      return updated;
+    }
+  }
+  return [...updated, { role: "assistant", content }];
 }

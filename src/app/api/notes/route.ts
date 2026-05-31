@@ -5,6 +5,7 @@ import { parseTags, stripMarkdown } from "@/lib/tags";
 import { ensureTagHierarchy } from "@/lib/tags-db";
 import { analyzeNote } from "@/lib/ai";
 import { getAIConfig, resolveSettings } from "@/lib/ai-config";
+import { markStaleTranscriptions } from "@/lib/transcription-jobs";
 
 function shouldSkipAIAnalysis(content: string) {
   return /\[失败\]|转写失败|转录失败/.test(content || "");
@@ -73,6 +74,7 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
+    await markStaleTranscriptions(userId);
     const url = new URL(req.url);
     const status = url.searchParams.get("status") || undefined;
     const tag = url.searchParams.get("tag") || undefined;
@@ -81,6 +83,12 @@ export async function GET(req: NextRequest) {
     const hasAI = url.searchParams.get("hasAI") || undefined;
     const view = url.searchParams.get("view") || "active";
     const sort = url.searchParams.get("sort") || undefined;
+    const from = url.searchParams.get("from") || undefined;
+    const to = url.searchParams.get("to") || undefined;
+    const knowledgeBaseId = url.searchParams.get("knowledgeBaseId") || undefined;
+    const unassigned = url.searchParams.get("unassigned") === "1";
+    const compact = url.searchParams.get("compact") === "1";
+    const viewMode = url.searchParams.get("viewMode") || "";
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 100);
     const offset = parseInt(url.searchParams.get("offset") || "0");
 
@@ -91,11 +99,22 @@ export async function GET(req: NextRequest) {
       where.deletedAt = null;
     }
     if (status) where.status = status;
+    if (from || to) {
+      const dateFilter: any = {};
+      if (from) dateFilter.gte = new Date(from);
+      if (to) dateFilter.lt = new Date(to);
+      where.OR = [{ createdAt: dateFilter }, { updatedAt: dateFilter }];
+    }
     if (source) {
       where.type = source === "manual" ? "manual" : source;
     }
+    if (knowledgeBaseId) {
+      where.knowledgeBaseId = knowledgeBaseId;
+    } else if (unassigned) {
+      where.knowledgeBaseId = null;
+    }
     if (search) {
-      where.OR = [
+      const searchOr = [
         { title: { contains: search } },
         { plainText: { contains: search } },
         { contentMd: { contains: search } },
@@ -103,6 +122,7 @@ export async function GET(req: NextRequest) {
         { aiResult: { is: { actionItems: { contains: search } } } },
         { tags: { some: { tag: { fullPath: { contains: search } } } } },
       ];
+      where.AND = [...(where.AND || []), { OR: searchOr }];
     }
     if (hasAI === "yes") where.aiResult = { isNot: null };
     if (hasAI === "no") where.aiResult = { is: null };
@@ -114,16 +134,62 @@ export async function GET(req: NextRequest) {
       };
     }
 
-    const [notes, total] = await Promise.all([
-      prisma.note.findMany({
-        where,
-        include: { tags: { include: { tag: true } }, aiResult: true },
-        orderBy: { [sort === "created" ? "createdAt" : "updatedAt"]: "desc" },
-        take: limit,
-        skip: offset,
-      }),
-      prisma.note.count({ where }),
-    ]);
+    const orderBy = { [sort === "created" ? "createdAt" : "updatedAt"]: "desc" };
+    const notesQuery = compact
+      ? prisma.note.findMany({
+          where,
+          select: { id: true, title: true, contentMd: true, createdAt: true, updatedAt: true, type: true, knowledgeBaseId: true },
+          orderBy,
+          take: limit,
+          skip: offset,
+        })
+      : viewMode === "timeline"
+      ? prisma.note.findMany({
+          where,
+          select: {
+            id: true,
+            title: true,
+            contentMd: true,
+            sourceUrl: true,
+            type: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+            tags: { include: { tag: true }, take: 4 },
+            aiResult: { select: { summary: true, keyPoints: true, suggestedTags: true } },
+          },
+          orderBy,
+          take: limit,
+          skip: offset,
+        })
+      : viewMode === "list"
+      ? prisma.note.findMany({
+          where,
+          select: {
+            id: true,
+            title: true,
+            contentMd: true,
+            type: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true,
+            knowledgeBaseId: true,
+            tags: { include: { tag: true }, take: 3 },
+            aiResult: { select: { summary: true } },
+          },
+          orderBy,
+          take: limit,
+          skip: offset,
+        })
+      : prisma.note.findMany({
+          where,
+          include: { tags: { include: { tag: true } }, aiResult: true },
+          orderBy,
+          take: limit,
+          skip: offset,
+        });
+
+    const [notes, total] = await Promise.all([notesQuery, prisma.note.count({ where })]);
 
     return NextResponse.json({ notes, total });
   } catch (e: any) {

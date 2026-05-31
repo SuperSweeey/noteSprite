@@ -37,6 +37,8 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const question = String(body.question || "").trim();
     const noteId = body.noteId || undefined;
+    const contextRefs = Array.isArray(body.contextRefs) ? body.contextRefs : [];
+    const temporaryLearningMode = body.temporaryLearningMode || null;
 
     if (!question) {
       return NextResponse.json({ error: "问题不能为空" }, { status: 400 });
@@ -49,7 +51,15 @@ export async function POST(req: NextRequest) {
     }
 
     const dbConfig = await getAIConfig(userId, "chat");
-    const spirit = await getSpiritConfig(userId);
+    const baseSpirit = await getSpiritConfig(userId);
+    const spirit =
+      temporaryLearningMode?.prompt
+        ? {
+            ...baseSpirit,
+            learningModeId: String(temporaryLearningMode.id || baseSpirit.learningModeId),
+            learningPrompt: String(temporaryLearningMode.prompt),
+          }
+        : baseSpirit;
     const apiKey = String(body.apiKey || "").trim() || dbConfig.apiKey;
     const baseUrl = String(body.baseUrl || "").trim() || dbConfig.baseUrl;
     const model = String(body.model || "").trim() || dbConfig.model;
@@ -71,7 +81,7 @@ export async function POST(req: NextRequest) {
     });
     await prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
 
-    const context = await buildNoteContext(userId, question, noteId);
+    const context = await buildNoteContext(userId, question, noteId, contextRefs);
     const history = await prisma.chatMessage.findMany({
       where: { userId, conversationId },
       orderBy: { createdAt: "desc" },
@@ -82,7 +92,13 @@ export async function POST(req: NextRequest) {
       content: m.content,
     }));
     const messages = [
-      { role: "system", content: systemPrompt + (noteId ? "\n用户正在查看某条笔记，请优先围绕当前笔记回答。" : "") },
+      {
+        role: "system",
+        content:
+          systemPrompt +
+          (noteId ? "\n用户正在查看某条笔记，请优先围绕当前笔记回答。" : "") +
+          "\n如果本轮回答使用了笔记或知识库上下文，请在回答末尾用「参考笔记」列出本次实际参考的笔记标题或知识库名称；如果笔记里没有相关信息，要明确说暂时没在笔记里看到。",
+      },
       ...historyMsgs,
       {
         role: "user",
@@ -183,8 +199,9 @@ export async function DELETE(req: NextRequest) {
   return NextResponse.json({ ok: true });
 }
 
-async function buildNoteContext(userId: string, question: string, noteId?: string): Promise<string> {
+async function buildNoteContext(userId: string, question: string, noteId?: string, contextRefs: any[] = []): Promise<string> {
   const chunks: string[] = [];
+  const mentions = extractMentions(question);
   if (noteId) {
     const note = await prisma.note.findFirst({ where: { id: noteId, userId }, include: { aiResult: true } });
     if (note) {
@@ -193,6 +210,70 @@ async function buildNoteContext(userId: string, question: string, noteId?: strin
       if (note.aiResult?.actionItems) {
         chunks.push(`\n【已有 AI 解读】\n${note.aiResult.actionItems.slice(0, 3000)}`);
       }
+    }
+  }
+
+  for (const ref of contextRefs) {
+    if (ref?.type === "knowledgeBase" && ref.id) {
+      const kb = await prisma.knowledgeBase.findFirst({
+        where: { userId, id: ref.id },
+        include: {
+          notes: {
+            where: { deletedAt: null },
+            orderBy: { updatedAt: "desc" },
+            take: 20,
+            include: { aiResult: true, tags: { include: { tag: true } } },
+          },
+        },
+      });
+      if (kb) {
+        chunks.push(`【引用知识库：${kb.name}】`);
+        chunks.push(formatKnowledgeBaseNotes(kb.notes));
+      }
+    }
+    if (ref?.type === "note" && ref.id) {
+      const note = await prisma.note.findFirst({
+        where: { userId, id: ref.id, deletedAt: null },
+        include: { aiResult: true, tags: { include: { tag: true } } },
+      });
+      if (note) {
+        const tags = note.tags.map((nt) => `#${nt.tag.fullPath}`).join(" ");
+        chunks.push(`【引用笔记：${note.title || ref.label || note.contentMd.slice(0, 40)}】`);
+        chunks.push(`标签：${tags || "无"}\n正文：${note.contentMd.slice(0, 5200)}${note.aiResult?.summary ? `\n\nAI 摘要：${note.aiResult.summary.slice(0, 1200)}` : ""}`);
+      }
+    }
+  }
+
+  for (const mention of mentions) {
+    const kb = await prisma.knowledgeBase.findFirst({
+      where: { userId, name: { contains: mention } },
+      include: {
+        notes: {
+          where: { deletedAt: null },
+          orderBy: { updatedAt: "desc" },
+          take: 16,
+          include: { aiResult: true, tags: { include: { tag: true } } },
+        },
+      },
+    });
+    if (kb) {
+      chunks.push(`【@知识库：${kb.name}】`);
+      chunks.push(formatKnowledgeBaseNotes(kb.notes));
+      continue;
+    }
+
+    const note = await prisma.note.findFirst({
+      where: {
+        userId,
+        deletedAt: null,
+        OR: [{ title: { contains: mention } }, { contentMd: { contains: mention } }, { plainText: { contains: mention } }],
+      },
+      include: { aiResult: true, tags: { include: { tag: true } } },
+    });
+    if (note) {
+      const tags = note.tags.map((nt) => `#${nt.tag.fullPath}`).join(" ");
+      chunks.push(`【@笔记：${note.title || mention}】`);
+      chunks.push(`标签：${tags || "无"}\n正文：${note.contentMd.slice(0, 5000)}${note.aiResult?.summary ? `\n\nAI 摘要：${note.aiResult.summary.slice(0, 1200)}` : ""}`);
     }
   }
 
@@ -252,6 +333,22 @@ async function buildNoteContext(userId: string, question: string, noteId?: strin
   }
 
   return chunks.join("\n\n");
+}
+
+function formatKnowledgeBaseNotes(notes: any[]) {
+  return notes
+    .map((note) => {
+      const tags = note.tags.map((nt: any) => `#${nt.tag.fullPath}`).join(" ");
+      const summary = note.aiResult?.summary ? `\nAI 摘要：${note.aiResult.summary.slice(0, 360)}` : "";
+      return `标题：${note.title || note.contentMd.slice(0, 40)}\n标签：${tags || "无"}\n正文摘录：${note.contentMd.slice(0, 520)}${summary}`;
+    })
+    .join("\n---\n")
+    .slice(0, 9200);
+}
+
+function extractMentions(question: string): string[] {
+  const matches = question.match(/@([^\s，。！？；：,.!?;:]+)/g) || [];
+  return Array.from(new Set(matches.map((item) => item.slice(1).trim()).filter(Boolean))).slice(0, 4);
 }
 
 function extractSearchTerms(question: string): string[] {

@@ -47,7 +47,12 @@ class TranscriptionPipeline:
             config.oss_bucket_name,
             config.oss_endpoint,
         )
-        self.transcriber = CloudTranscriber(config.dashscope_api_key)
+        self.transcriber = CloudTranscriber(
+            config.dashscope_api_key,
+            enable_timestamps=str(config.transcribe_enable_timestamps) != "0",
+            enable_speaker_diarization=str(config.transcribe_enable_speaker_diarization) != "0",
+            speaker_count=int(config.transcribe_speaker_count or 0),
+        )
         self.notion = NotionSync(config.notion_token, config.notion_database_id)
 
         Logger.success("所有组件初始化完成")

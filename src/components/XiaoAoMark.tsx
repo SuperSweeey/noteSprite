@@ -13,10 +13,10 @@ const SIZE_MAP = {
 };
 
 const SRC_MAP = {
-  logo: "/xiaoao_logo.png",
-  portrait: "/大头照.png",
-  thinking: "/AI 思考中：托腮发呆.png",
-  writing: "/新建笔记：抱着大铅笔.png",
+  logo: "/new_logo.png",
+  portrait: "/new_logo.png",
+  thinking: "/new_logo.png",
+  writing: "/new_logo.png",
 };
 
 export function XiaoAoMark({

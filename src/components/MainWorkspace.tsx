@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { stripMarkdown } from "@/lib/tags";
 
 interface Note {
@@ -12,6 +12,7 @@ interface Note {
   type: string;
   status: string;
   createdAt: string;
+  updatedAt: string;
   tags: { tag: { id: string; fullPath: string } }[];
   aiResult?: {
     summary: string;
@@ -22,65 +23,40 @@ interface Note {
 
 interface RuntimeSettings {
   defaultSort: "updated" | "created";
-  deleteMode: "trash" | "permanent";
+  aiName: string;
 }
 
-function safeParse(value?: string | null): string[] {
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
-  } catch {
-    return [];
-  }
-}
-
-export function MainWorkspace() {
+export function MainWorkspace({
+  onSpiritPrompt,
+}: {
+  onSpiritPrompt?: (question: string) => void;
+}) {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const [content, setContent] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [notes, setNotes] = useState<Note[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [activeTag, setActiveTag] = useState<string | null>(searchParams.get("tag"));
-  const [query, setQuery] = useState(searchParams.get("search") || "");
-  const [view, setView] = useState<"active" | "trash">("active");
-  const [statusFilter, setStatusFilter] = useState<"all" | "inbox" | "processing" | "failed" | "archived">("all");
-  const [sourceFilter, setSourceFilter] = useState<"all" | "manual" | "douyin" | "bilibili" | "youtube" | "xiaohongshu" | "link">("all");
-  const [aiFilter, setAiFilter] = useState<"all" | "yes" | "no">("all");
   const [mode, setMode] = useState<"write" | "link">("write");
   const [linkUrl, setLinkUrl] = useState("");
   const [linkMsg, setLinkMsg] = useState("");
-  const [justSaved, setJustSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [loading, setLoading] = useState(true);
   const [retryingId, setRetryingId] = useState<string | null>(null);
-  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings>({ defaultSort: "updated", deleteMode: "trash" });
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [floatingHintOpen, setFloatingHintOpen] = useState(false);
+  const [settings, setSettings] = useState<RuntimeSettings>({ defaultSort: "updated", aiName: "AI" });
+  const [openingNoteId, setOpeningNoteId] = useState<string | null>(null);
 
   const fetchNotes = useCallback(async () => {
-    const params = new URLSearchParams({ limit: "80" });
-    params.set("sort", runtimeSettings.defaultSort);
-    if (activeTag) params.set("tag", activeTag);
-    if (query.trim()) params.set("search", query.trim());
-    if (view === "trash") params.set("view", "trash");
-    if (statusFilter !== "all" && view !== "trash") params.set("status", statusFilter);
-    if (sourceFilter !== "all") params.set("source", sourceFilter);
-    if (aiFilter !== "all") params.set("hasAI", aiFilter);
+    const params = new URLSearchParams({ limit: "100", sort: "created", viewMode: "timeline" });
     const resp = await fetch(`/api/notes?${params}`);
     const data = await resp.json();
-    setNotes(data.notes || []);
+    setNotes(sortByTimeline(data.notes || []));
     setLoading(false);
-  }, [activeTag, query, view, statusFilter, sourceFilter, aiFilter, runtimeSettings.defaultSort]);
+  }, []);
 
   useEffect(() => {
     fetch("/api/settings")
       .then((resp) => resp.json())
-      .then((data) => {
-        if (data.knowledge) {
-          setRuntimeSettings({
-            defaultSort: data.knowledge.defaultSort || "updated",
-            deleteMode: data.knowledge.deleteMode || "trash",
-          });
-        }
-      })
+      .then((data) => setSettings({ defaultSort: data.knowledge?.defaultSort || "updated", aiName: data.spirit?.name || "AI" }))
       .catch(() => {});
   }, []);
 
@@ -106,8 +82,6 @@ export function MainWorkspace() {
     });
     if (resp.ok) {
       setContent("");
-      setJustSaved(true);
-      setTimeout(() => setJustSaved(false), 1800);
       fetchNotes();
     }
     setSaving(false);
@@ -115,7 +89,7 @@ export function MainWorkspace() {
 
   const submitLink = async () => {
     const url = linkUrl.trim();
-    if (!url) return;
+    if (!url || saving) return;
     setSaving(true);
     setLinkMsg("AI 正在识别这条链接...");
     const resp = await fetch("/api/transcribe", {
@@ -123,7 +97,7 @@ export function MainWorkspace() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     });
-    const data = await resp.json();
+    const data = await resp.json().catch(() => ({}));
     if (resp.ok) {
       setLinkUrl("");
       setLinkMsg("");
@@ -134,42 +108,7 @@ export function MainWorkspace() {
     setSaving(false);
   };
 
-  const handleArchive = async (e: React.MouseEvent, noteId: string) => {
-    e.stopPropagation();
-    await fetch(`/api/notes/${noteId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "archived" }),
-    });
-    fetchNotes();
-  };
-
-  const handleDelete = async (e: React.MouseEvent, noteId: string) => {
-    e.stopPropagation();
-    const permanent = runtimeSettings.deleteMode === "permanent";
-    if (!confirm(permanent ? "设置当前为直接永久删除，确定删除吗？" : "确定把这页放进最近删除吗？")) return;
-    await fetch(`/api/notes/${noteId}${permanent ? "?permanentNow=true" : ""}`, { method: "DELETE" });
-    fetchNotes();
-  };
-
-  const handleRestore = async (e: React.MouseEvent, noteId: string) => {
-    e.stopPropagation();
-    await fetch(`/api/notes/${noteId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ restore: true }),
-    });
-    fetchNotes();
-  };
-
-  const handlePermanentDelete = async (e: React.MouseEvent, noteId: string) => {
-    e.stopPropagation();
-    if (!confirm("永久删除后不能恢复，确定删除吗？")) return;
-    await fetch(`/api/notes/${noteId}?permanent=true`, { method: "DELETE" });
-    fetchNotes();
-  };
-
-  const handleRetryTranscribe = async (e: React.MouseEvent, noteId: string) => {
+  const retryTranscribe = async (e: React.MouseEvent, noteId: string) => {
     e.stopPropagation();
     if (retryingId) return;
     setRetryingId(noteId);
@@ -186,493 +125,380 @@ export function MainWorkspace() {
     setRetryingId(null);
   };
 
-  const grouped = groupByTime(notes);
-  const stats = makeStats(notes);
-  const topTags = getTopTags(notes);
-  const sources = getSources(notes);
-  const attentionNotes = notes.filter((note) => note.status === "processing" || note.status === "failed").slice(0, 5);
+  const groups = useMemo(() => groupTimeline(notes), [notes]);
+  const prompt = makeTimelinePrompt(notes, settings.aiName);
+
+  useEffect(() => {
+    if (!prompt) return;
+    const showDelay = 16000 + Math.random() * 12000;
+    let hideTimer: number | undefined;
+    const showTimer = window.setTimeout(() => {
+      setFloatingHintOpen(true);
+      hideTimer = window.setTimeout(() => setFloatingHintOpen(false), 11000);
+    }, showDelay);
+    return () => {
+      window.clearTimeout(showTimer);
+      if (hideTimer) window.clearTimeout(hideTimer);
+    };
+  }, [prompt?.question]);
 
   return (
-    <main className="flex min-h-screen flex-1 flex-col bg-[var(--paper-bg)]">
-      <div className="px-6 pb-4 pt-6">
-        <div className="paper-card p-5">
-          <div className="mb-4 flex gap-6">
-            <button
-              onClick={() => setMode("write")}
-              className={`border-b-2 pb-1.5 text-[15px] transition-colors ${
-                mode === "write"
-                  ? "border-[var(--gold)] font-medium text-[var(--ink)]"
-                  : "border-transparent text-[var(--ink-faint)] hover:text-[var(--ink-light)]"
-              }`}
-            >
-              记一页
-            </button>
-            <button
-              onClick={() => setMode("link")}
-              className={`border-b-2 pb-1.5 text-[15px] transition-colors ${
-                mode === "link"
-                  ? "border-[var(--gold)] font-medium text-[var(--ink)]"
-                  : "border-transparent text-[var(--ink-faint)] hover:text-[var(--ink-light)]"
-              }`}
-            >
-              收链接
-            </button>
-          </div>
+    <main className="flex min-h-screen flex-1 flex-col bg-[#f6f6f8]">
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-[1080px] px-8 pb-20 pt-8">
+          <Composer
+            open={composerOpen}
+            setOpen={setComposerOpen}
+            mode={mode}
+            setMode={setMode}
+            content={content}
+            setContent={setContent}
+            saving={saving}
+            save={save}
+            linkUrl={linkUrl}
+            setLinkUrl={setLinkUrl}
+            submitLink={submitLink}
+            linkMsg={linkMsg}
+          />
 
-          {mode === "write" ? (
-            <div className={justSaved ? "opacity-50 transition-opacity duration-500" : ""}>
-              <textarea
-                className="min-h-[80px] w-full resize-none bg-transparent text-[17px] leading-relaxed text-[var(--ink)] outline-none"
-                style={{ caretColor: "var(--gold)" }}
-                placeholder={pickPlaceholder()}
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                    e.preventDefault();
-                    save();
-                  }
-                }}
-                autoFocus
-              />
-              <div className="mt-2 flex items-center justify-between">
-                <span className="text-[13px] text-[var(--ink-faint)]">Ctrl + Enter 收好 · 支持 #标签/子标签</span>
-                <button
-                  onClick={save}
-                  disabled={!content.trim() || saving}
-                  className="rounded-full px-4 py-1.5 text-sm font-medium text-white transition-all active:scale-95 disabled:opacity-25"
-                  style={{ background: "var(--gold)" }}
-                >
-                  {saving ? "..." : content.trim() ? "收好" : "保存"}
-                </button>
-              </div>
-              {justSaved && <p className="mt-2 text-[13px] text-[var(--sage)]">这一页已经被 NoteSprite 收进来了。</p>}
-            </div>
-          ) : (
+          <div className="mt-12 flex items-center justify-between">
             <div>
-              <div className="flex gap-2">
-                <input
-                  type="url"
-                  className="flex-1 rounded-xl border border-[var(--paper-border)] bg-[var(--paper-bg)] px-4 py-3 text-[15px] text-[var(--ink)] outline-none"
-                  placeholder="贴一条抖音 / B站 / YouTube / 小红书链接"
-                  value={linkUrl}
-                  onChange={(e) => setLinkUrl(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") submitLink();
-                  }}
-                  autoFocus
-                />
-                <button
-                  onClick={submitLink}
-                  disabled={!linkUrl.trim() || saving}
-                  className="whitespace-nowrap rounded-xl px-5 py-3 text-sm font-medium text-white transition-all active:scale-95 disabled:opacity-25"
-                  style={{ background: "var(--gold)" }}
-                >
-                  {saving ? "整理中..." : "收下链接"}
-                </button>
-              </div>
-              {linkMsg && <p className="mt-2 pl-1 text-[13px] text-[var(--ink-light)]">{linkMsg}</p>}
-              <p className="mt-3 pl-1 text-[13px] text-[var(--ink-faint)]">
-                自动下载 → 转成文字 → 交给 AI 整理 → 存进 NoteSprite
-              </p>
+              <p className="text-[11px] font-medium uppercase tracking-[0.32em] text-[#a0a4ad]">Timeline</p>
+              <h1 className="mt-2 text-[25px] font-semibold tracking-[-0.025em] text-[#1d1d1f]">最近的笔记流</h1>
+              <p className="mt-2 text-sm leading-6 text-[#7a828f]">按写下或收进来的时间排列，新的在前面。</p>
+            </div>
+            <button onClick={fetchNotes} className="rounded-full bg-white/75 px-4 py-2 text-sm text-[#6b7280] shadow-[0_10px_35px_rgba(0,0,0,0.05)] hover:text-[#1d1d1f]">
+              刷新
+            </button>
+          </div>
+
+          {loading ? (
+            <div className="flex justify-center py-24">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#d1d5db] border-t-[#1d1d1f]" />
+            </div>
+          ) : notes.length === 0 ? (
+            <div className="py-24 text-center text-sm text-[#8f96a3]">还没有笔记。先写一句话就好。</div>
+          ) : (
+            <div className="mt-8 space-y-8">
+              {groups.map((group) => (
+                <section key={group.label} className="grid gap-3 md:grid-cols-[56px_1fr]">
+                  <div className="pt-1 md:text-right">
+                    <p className="text-[13px] font-medium text-[#1d1d1f]">{group.label}</p>
+                    <p className="mt-1 text-[11px] text-[#a0a4ad]">{group.notes.length} 页</p>
+                  </div>
+                  <div className="relative space-y-3 border-l border-[#e4e6eb] pl-5">
+                    {group.notes.map((note) => (
+                      <TimelineEntry
+                        key={note.id}
+                        note={note}
+                        onOpen={() => {
+                          setOpeningNoteId(note.id);
+                          router.push(`/note/${note.id}`);
+                        }}
+                        onPrefetch={() => router.prefetch(`/note/${note.id}`)}
+                        onRetry={(e) => retryTranscribe(e, note.id)}
+                        retrying={retryingId === note.id}
+                        opening={openingNoteId === note.id}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ))}
             </div>
           )}
         </div>
       </div>
-
-      <div className="flex-1 overflow-y-auto pb-12">
-        <div className="px-7 py-3">
-          <div className="mb-3 grid gap-3 md:grid-cols-4">
-            <StatCard label="全部" value={notes.length} />
-            <StatCard label="有 AI 整理" value={stats.withAI} />
-            <StatCard label="处理中/失败" value={stats.needsAttention} />
-            <StatCard label="标签" value={stats.tags} />
-          </div>
-          <div className="paper-card p-4">
-            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-              <div>
-                <span className="text-[15px] font-medium text-[var(--ink)]">
-                  {view === "trash" ? "最近删除" : "知识库"}
-                  {!loading && <span className="ml-1 font-normal text-[var(--ink-faint)]">{notes.length}</span>}
-                </span>
-                <p className="mt-1 text-xs text-[var(--ink-faint)]">按关键词、来源、状态和 AI 整理情况筛选你的真实笔记。</p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button onClick={() => setView("active")} className={pillClass(view === "active")}>全部笔记</button>
-                <button onClick={() => setView("trash")} className={pillClass(view === "trash")}>最近删除</button>
-                <button onClick={fetchNotes} className="rounded-full border border-[var(--paper-border)] px-3 py-1.5 text-xs text-[var(--ink-faint)] hover:text-[var(--ink-light)]">刷新</button>
-              </div>
-            </div>
-
-            <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(220px,1fr)_180px_180px_180px]">
-              <input
-                className="rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none"
-                placeholder="搜索标题、正文、AI 解读、标签"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-              <select className="rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)} disabled={view === "trash"}>
-                <option value="all">全部状态</option>
-                <option value="inbox">收集箱</option>
-                <option value="processing">处理中</option>
-                <option value="failed">转录失败</option>
-                <option value="archived">已归档</option>
-              </select>
-              <select className="rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value as any)}>
-                <option value="all">全部来源</option>
-                <option value="manual">手写笔记</option>
-                <option value="douyin">抖音</option>
-                <option value="bilibili">B站</option>
-                <option value="youtube">YouTube</option>
-                <option value="xiaohongshu">小红书</option>
-                <option value="link">普通链接</option>
-              </select>
-              <select className="rounded-[10px] border border-[var(--paper-border)] bg-white px-3 py-2 text-sm outline-none" value={aiFilter} onChange={(e) => setAiFilter(e.target.value as any)}>
-                <option value="all">AI 整理不限</option>
-                <option value="yes">已有 AI 整理</option>
-                <option value="no">暂无 AI 整理</option>
-              </select>
-            </div>
-
-            {(activeTag || query || statusFilter !== "all" || sourceFilter !== "all" || aiFilter !== "all" || view === "trash") && (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {activeTag && <button onClick={() => setActiveTag(null)} className="rounded-full bg-[var(--gold-light)] px-3 py-1 text-[13px] text-[var(--gold)]">#{activeTag} ×</button>}
-                <button
-                  onClick={() => {
-                    setQuery("");
-                    setActiveTag(null);
-                    setStatusFilter("all");
-                    setSourceFilter("all");
-                    setAiFilter("all");
-                    setView("active");
-                  }}
-                  className="rounded-full border border-[var(--paper-border)] px-3 py-1 text-[13px] text-[var(--ink-faint)]"
-                >
-                  清空筛选
-                </button>
-              </div>
-            )}
-          </div>
-
-          {view !== "trash" && (
-            <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(260px,0.8fr)]">
-              <InsightPanel title="常用标签" empty="还没有标签。">
-                {topTags.map((item) => (
-                  <button key={item.tag} onClick={() => setActiveTag(item.tag)} className="rounded-full border border-[var(--paper-border)] bg-white px-3 py-1.5 text-xs text-[var(--ink-light)] hover:border-[var(--accent-blue)] hover:text-[var(--accent-blue)]">
-                    #{item.tag} <span className="text-[var(--ink-faint)]">{item.count}</span>
-                  </button>
-                ))}
-              </InsightPanel>
-              <InsightPanel title="来源分布" empty="还没有来源。">
-                {sources.map((item) => (
-                  <button key={item.source} onClick={() => setSourceFilter(item.source as any)} className="rounded-full border border-[var(--paper-border)] bg-white px-3 py-1.5 text-xs text-[var(--ink-light)] hover:border-[var(--accent-blue)] hover:text-[var(--accent-blue)]">
-                    {platformBadge(item.source)} <span className="text-[var(--ink-faint)]">{item.count}</span>
-                  </button>
-                ))}
-              </InsightPanel>
-              <InsightPanel title="待处理" empty="没有需要处理的笔记。">
-                {attentionNotes.map((note) => (
-                  <button key={note.id} onClick={() => router.push(`/note/${note.id}`)} className="block w-full rounded-[8px] border border-[var(--paper-border)] bg-white px-3 py-2 text-left text-xs text-[var(--ink-light)] hover:bg-[var(--paper-soft)]">
-                    <span className={note.status === "failed" ? "text-red-500" : "text-[var(--gold)]"}>{note.status === "failed" ? "失败" : "处理中"}</span>
-                    <span className="ml-2">{(note.title || stripMarkdown(note.contentMd)).slice(0, 34)}</span>
-                  </button>
-                ))}
-              </InsightPanel>
-            </div>
-          )}
-        </div>
-
-        {loading ? (
-          <div className="flex justify-center py-20">
-            <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--paper-border)] border-t-[var(--gold)]" />
-          </div>
-        ) : notes.length === 0 ? (
-          <div className="px-8 py-16 text-center">
-            <p className="mb-2 text-2xl">✦</p>
-            <p className="font-prose text-[15px] text-[var(--ink-light)]">这里还很安静。</p>
-            <p className="mt-1.5 text-[13px] text-[var(--ink-faint)]">写下第一条想法，NoteSprite 会陪你把它慢慢整理好。</p>
-          </div>
-        ) : (
-          <div>
-            {Object.entries(grouped).map(([group, groupNotes]) => (
-              <div key={group}>
-                <div className="sticky top-0 z-10 bg-[var(--paper-bg)]/90 px-7 py-2.5 text-[13px] font-medium text-[var(--ink-faint)] backdrop-blur-sm">
-                  {group}
-                </div>
-                <div className="space-y-2 px-5">
-                  {groupNotes.map((note) => (
-                    <NoteCard
-                      key={note.id}
-                      note={note}
-                      onTagClick={(tag) => setActiveTag(tag === activeTag ? null : tag)}
-                      onArchive={(e) => handleArchive(e, note.id)}
-                      onDelete={(e) => handleDelete(e, note.id)}
-                      onRestore={(e) => handleRestore(e, note.id)}
-                      onPermanentDelete={(e) => handlePermanentDelete(e, note.id)}
-                      onRetryTranscribe={(e) => handleRetryTranscribe(e, note.id)}
-                      retrying={retryingId === note.id}
-                      inTrash={view === "trash"}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      {prompt && (
+        <FloatingHint
+          open={floatingHintOpen}
+          aiName={settings.aiName}
+          question={prompt.question}
+          onToggle={() => setFloatingHintOpen((value) => !value)}
+          onAsk={() => {
+            setFloatingHintOpen(false);
+            onSpiritPrompt?.(prompt.question);
+          }}
+        />
+      )}
     </main>
   );
 }
 
-function NoteCard({
-  note,
-  onTagClick,
-  onArchive,
-  onDelete,
-  onRestore,
-  onPermanentDelete,
-  onRetryTranscribe,
-  retrying,
-  inTrash,
+function Composer({
+  open,
+  setOpen,
+  mode,
+  setMode,
+  content,
+  setContent,
+  saving,
+  save,
+  linkUrl,
+  setLinkUrl,
+  submitLink,
+  linkMsg,
 }: {
-  note: Note;
-  onTagClick: (tag: string) => void;
-  onArchive: (e: React.MouseEvent) => void;
-  onDelete: (e: React.MouseEvent) => void;
-  onRestore: (e: React.MouseEvent) => void;
-  onPermanentDelete: (e: React.MouseEvent) => void;
-  onRetryTranscribe: (e: React.MouseEvent) => void;
-  retrying: boolean;
-  inTrash: boolean;
+  open: boolean;
+  setOpen: (value: boolean) => void;
+  mode: "write" | "link";
+  setMode: (mode: "write" | "link") => void;
+  content: string;
+  setContent: (value: string) => void;
+  saving: boolean;
+  save: () => void;
+  linkUrl: string;
+  setLinkUrl: (value: string) => void;
+  submitLink: () => void;
+  linkMsg: string;
 }) {
-  const router = useRouter();
-  const isProcessing = note.status === "processing";
-  const isTranscribeFailed = (note.status === "failed" || note.contentMd.includes("[失败]")) && Boolean(note.sourceUrl);
-  const cleanContent = stripMarkdown(note.contentMd);
-  const title = note.title || cleanContent.slice(0, 120);
-  const summary = note.aiResult?.summary || "";
-  const suggestedTags = safeParse(note.aiResult?.suggestedTags);
-  const keyPoints = safeParse(note.aiResult?.keyPoints);
-  const bodyPreview = summary || cleanContent.slice(0, 160);
-
   return (
-    <div
-      className={`paper-card px-5 py-4 ${isProcessing ? "cursor-default opacity-70" : "cursor-pointer"}`}
-      onClick={() => {
-        if (!isProcessing) router.push(`/note/${note.id}`);
-      }}
-    >
-      {isProcessing ? (
-        <div>
-          <div className="mb-1.5 flex items-center gap-2">
-            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[var(--gold)] border-t-transparent" />
-            <span className="text-sm font-medium text-[var(--gold)]">AI 正在整理这页...</span>
-          </div>
-          <p className="text-sm text-[var(--ink-faint)]">{note.contentMd.slice(0, 80)}</p>
-        </div>
+    <section className={`rounded-[26px] bg-white/92 shadow-[0_18px_55px_rgba(15,23,42,0.065)] ring-1 ring-black/[0.045] backdrop-blur transition-all ${open ? "px-7 py-6" : "px-5 py-4"}`}>
+      {!open ? (
+        <button onClick={() => setOpen(true)} className="flex w-full items-center justify-between text-left">
+          <span className="text-[16px] text-[#8f96a3]">写一句，或收一条链接...</span>
+          <span className="rounded-full bg-[#1d1d1f] px-4 py-2 text-sm text-white">打开</span>
+        </button>
       ) : (
+      <>
+      <div className="flex gap-5">
+        <button onClick={() => setMode("write")} className={composerTab(mode === "write")}>记一页</button>
+        <button onClick={() => setMode("link")} className={composerTab(mode === "link")}>收链接</button>
+        <button onClick={() => setOpen(false)} className="ml-auto rounded-full bg-[#f5f5f7] px-3 py-1.5 text-xs text-[#8f96a3] hover:text-[#1d1d1f]">收起</button>
+      </div>
+      {mode === "write" ? (
         <>
-          <div className="mb-2 flex items-center gap-2">
-            {note.type !== "manual" && (
-              <span
-                className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-                  note.type === "link" ? "bg-blue-50 text-blue-600" : "bg-[var(--sage-light)] text-[var(--sage)]"
-                }`}
-              >
-                {note.type === "link" ? "链接" : platformBadge(note.type)}
-              </span>
-            )}
-            {summary && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-600">AI 整理</span>}
-            {note.status === "failed" && <span className="rounded-full bg-red-50 px-2 py-0.5 text-xs text-red-500">转录失败</span>}
-            {note.status === "archived" && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">已归档</span>}
-            <span className="ml-auto text-xs text-[var(--ink-faint)]">{formatTime(note.createdAt)}</span>
-          </div>
-
-          <p className="mb-1.5 line-clamp-2 text-[16px] font-medium leading-relaxed text-[var(--ink)]">{title}</p>
-
-          {bodyPreview && <p className="mb-2 line-clamp-2 text-[14px] leading-relaxed text-[var(--ink-light)]">{bodyPreview}</p>}
-
-          {keyPoints.length > 0 && (
-            <div className="mb-2 flex flex-wrap gap-1">
-              {keyPoints.slice(0, 3).map((point, index) => (
-                <span key={`${point}-${index}`} className="rounded-full bg-[var(--sage-light)]/70 px-2 py-0.5 text-xs text-[var(--sage)]">
-                  · {point.slice(0, 30)}
-                </span>
-              ))}
-            </div>
-          )}
-
-          <div className="flex flex-wrap items-center gap-1.5">
-            {note.tags?.slice(0, 3).map((nt) => (
-              <span
-                key={nt.tag.id}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onTagClick(nt.tag.fullPath);
-                }}
-                className="cursor-pointer rounded-full bg-[var(--gold-light)] px-2 py-0.5 text-xs text-[var(--gold)] transition-opacity hover:opacity-80"
-              >
-                #{nt.tag.fullPath}
-              </span>
-            ))}
-
-            {note.tags?.length > 3 && <span className="text-xs text-[var(--ink-faint)]">+{note.tags.length - 3}</span>}
-
-            {suggestedTags
-              .filter((tag) => !note.tags?.some((nt) => nt.tag.fullPath === tag))
-              .slice(0, 2)
-              .map((tag) => (
-                <span
-                  key={tag}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onTagClick(tag);
-                  }}
-                  className="cursor-pointer rounded-full border border-dashed border-[var(--paper-border)] px-2 py-0.5 text-xs text-[var(--ink-faint)] hover:bg-[var(--paper-hover)]"
-                >
-                  +{tag}
-                </span>
-              ))}
-
-            <div className="ml-auto flex items-center gap-0.5">
-              {isTranscribeFailed && (
-                <button
-                  onClick={(e) => onRetryTranscribe(e as any)}
-                  disabled={retrying}
-                  className="rounded px-2 py-1 text-xs text-blue-600 transition-colors hover:bg-blue-50 disabled:opacity-40"
-                >
-                  {retrying ? "重试中" : "重新转录"}
-                </button>
-              )}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  router.push(`/note/${note.id}`);
-                }}
-                className="rounded px-2 py-1 text-xs text-[var(--ink-faint)] transition-colors hover:bg-[var(--paper-hover)] hover:text-[var(--ink)]"
-              >
-                打开
-              </button>
-              {inTrash ? (
-                <>
-                  <button
-                    onClick={(e) => onRestore(e as any)}
-                    className="rounded px-2 py-1 text-xs text-blue-600 transition-colors hover:bg-blue-50"
-                  >
-                    恢复
-                  </button>
-                  <button
-                    onClick={(e) => onPermanentDelete(e as any)}
-                    className="rounded px-2 py-1 text-xs text-red-500 transition-colors hover:bg-red-50"
-                  >
-                    永久删除
-                  </button>
-                </>
-              ) : note.status === "inbox" && (
-                <button
-                  onClick={(e) => onArchive(e as any)}
-                  className="rounded px-2 py-1 text-xs text-[var(--ink-faint)] transition-colors hover:bg-[var(--sage-light)] hover:text-[var(--sage)]"
-                >
-                  归档
-                </button>
-              )}
-              {!inTrash && (
-                <button
-                  onClick={(e) => onDelete(e as any)}
-                  className="rounded px-2 py-1 text-xs text-[var(--ink-faint)] transition-colors hover:bg-red-50 hover:text-red-400"
-                >
-                  删除
-                </button>
-              )}
-            </div>
+          <textarea
+            className="mt-6 min-h-[120px] w-full resize-none bg-transparent text-[21px] leading-9 text-[#1d1d1f] outline-none placeholder:text-[#a0a4ad]"
+            placeholder={pickPlaceholder()}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                save();
+              }
+            }}
+          />
+          <div className="mt-4 flex items-center justify-between">
+            <span className="text-sm text-[#8f96a3]">Ctrl + Enter 收好 · 支持 #标签/子标签</span>
+            <button onClick={save} disabled={!content.trim() || saving} className="rounded-full bg-[#1d1d1f] px-5 py-2.5 text-sm text-white disabled:bg-[#c9d3f7]">
+              {saving ? "保存中" : content.trim() ? "收好" : "保存"}
+            </button>
           </div>
         </>
+      ) : (
+        <>
+          <div className="mt-6 flex gap-3">
+            <input
+              type="url"
+              className="min-h-[56px] flex-1 rounded-[18px] bg-[#f5f5f7] px-4 text-[16px] outline-none placeholder:text-[#a0a4ad]"
+              placeholder="贴一条抖音 / B站 / YouTube / 小红书链接"
+              value={linkUrl}
+              onChange={(e) => setLinkUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitLink();
+              }}
+            />
+            <button onClick={submitLink} disabled={!linkUrl.trim() || saving} className="rounded-[18px] bg-[#1d1d1f] px-5 text-sm text-white disabled:bg-[#c9d3f7]">
+              {saving ? "整理中" : "收下"}
+            </button>
+          </div>
+          {linkMsg && <p className="mt-3 text-sm text-[#6b7280]">{linkMsg}</p>}
+        </>
       )}
-    </div>
-  );
-}
-
-function platformBadge(type: string): string {
-  const labels: Record<string, string> = {
-    douyin: "抖音",
-    bilibili: "B站",
-    youtube: "YouTube",
-    xiaohongshu: "小红书",
-    web: "网页",
-    pdf: "PDF",
-  };
-  return labels[type] || type;
-}
-
-function pillClass(active: boolean) {
-  return `rounded-full px-3 py-1.5 text-xs transition-colors ${
-    active ? "bg-[var(--ink)] text-white" : "border border-[var(--paper-border)] text-[var(--ink-faint)] hover:text-[var(--ink-light)]"
-  }`;
-}
-
-function StatCard({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-[8px] border border-[var(--paper-border)] bg-white px-4 py-3">
-      <div className="text-xs text-[var(--ink-faint)]">{label}</div>
-      <div className="mt-1 text-xl font-semibold text-[var(--ink)]">{value}</div>
-    </div>
-  );
-}
-
-function InsightPanel({ title, empty, children }: { title: string; empty: string; children: React.ReactNode }) {
-  const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children);
-  return (
-    <section className="rounded-[8px] border border-[var(--paper-border)] bg-white px-4 py-3">
-      <h3 className="text-xs font-medium text-[var(--ink)]">{title}</h3>
-      <div className="mt-2 flex flex-wrap gap-2">
-        {hasChildren ? children : <span className="text-xs text-[var(--ink-faint)]">{empty}</span>}
-      </div>
+      </>
+      )}
     </section>
   );
 }
 
-function makeStats(notes: Note[]) {
-  const tags = new Set<string>();
-  let withAI = 0;
-  let needsAttention = 0;
-  for (const note of notes) {
-    if (note.aiResult) withAI += 1;
-    if (note.status === "processing" || note.status === "failed") needsAttention += 1;
-    for (const nt of note.tags || []) tags.add(nt.tag.fullPath);
+function FloatingHint({
+  open,
+  aiName,
+  question,
+  onToggle,
+  onAsk,
+}: {
+  open: boolean;
+  aiName: string;
+  question: string;
+  onToggle: () => void;
+  onAsk: () => void;
+}) {
+  if (!open) {
+    return (
+      <button
+        onClick={onToggle}
+        className="fixed bottom-7 right-8 z-20 flex h-12 w-12 items-center justify-center rounded-full bg-[#1d1d1f] text-[18px] text-white shadow-[0_20px_60px_rgba(0,0,0,0.22)] transition-transform hover:-translate-y-0.5"
+      >
+        ✨
+      </button>
+    );
   }
-  return { withAI, needsAttention, tags: tags.size };
+
+  return (
+    <div className="fixed bottom-7 right-8 z-20 max-w-[360px] animate-fade-up">
+      <div className="relative rounded-[24px] bg-[#1d1d1f] px-5 py-4 text-white shadow-[0_28px_85px_rgba(0,0,0,0.25)]">
+        <button onClick={onToggle} className="absolute right-3 top-3 rounded-full px-2 text-xs text-white/45 hover:text-white">×</button>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-[#7dd3fc]" />
+          <span className="text-xs text-white/55">💭 {aiName} 刚冒出来</span>
+        </div>
+        <button onClick={onAsk} className="block text-left text-[15px] leading-7 text-white">
+          {question}
+        </button>
+      </div>
+      <div className="ml-auto mr-8 h-4 w-4 rotate-45 bg-[#1d1d1f]" />
+    </div>
+  );
 }
 
-function getTopTags(notes: Note[]) {
-  const counts = new Map<string, number>();
-  for (const note of notes) {
-    for (const nt of note.tags || []) {
-      counts.set(nt.tag.fullPath, (counts.get(nt.tag.fullPath) || 0) + 1);
-    }
-  }
-  return Array.from(counts.entries())
-    .map(([tag, count]) => ({ tag, count }))
-    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
-    .slice(0, 10);
+function TimelineEntry({
+  note,
+  onOpen,
+  onPrefetch,
+  onRetry,
+  retrying,
+  opening,
+}: {
+  note: Note;
+  onOpen: () => void;
+  onPrefetch: () => void;
+  onRetry: (e: React.MouseEvent) => void;
+  retrying: boolean;
+  opening: boolean;
+}) {
+  const preview = makeNotePreview(note);
+  const isFailed = (note.status === "failed" || note.contentMd.includes("[失败]")) && Boolean(note.sourceUrl);
+  const points = safeParse(note.aiResult?.keyPoints).slice(0, 2);
+
+  return (
+    <article className="group relative">
+      <span className="absolute -left-[21px] top-6 h-2.5 w-2.5 rounded-full bg-[#1d1d1f] ring-4 ring-[#f6f6f8]" />
+      <button onClick={onOpen} onMouseEnter={onPrefetch} className="w-full rounded-[18px] bg-white/78 px-5 py-4 text-left shadow-[0_12px_34px_rgba(15,23,42,0.035)] ring-1 ring-black/[0.035] transition-all hover:-translate-y-0.5 hover:bg-white hover:shadow-[0_18px_50px_rgba(15,23,42,0.07)]">
+        <div className="flex items-start gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              {note.aiResult && note.type !== "manual" && <span className="rounded-full bg-[#edf3ff] px-2.5 py-1 text-xs text-[#2563eb]">AI 整理</span>}
+              <span className={`rounded-full px-2.5 py-1 text-xs ${note.type === "manual" ? "bg-[#f5f5f7] text-[#69707d]" : "bg-[#eef3ff] text-[#2563eb]"}`}>{sourceLabel(note.type)}</span>
+              {isFailed && <span className="rounded-full bg-red-50 px-2.5 py-1 text-xs text-red-500">转录失败</span>}
+              <span className="ml-auto text-xs text-[#a0a4ad]">{opening ? "打开中..." : formatTime(note.createdAt)}</span>
+            </div>
+            <h2 className="line-clamp-2 text-[18px] font-semibold leading-7 tracking-[-0.01em] text-[#1d1d1f]">{note.title || preview.title || "未命名笔记"}</h2>
+            <p className="mt-2 line-clamp-3 whitespace-pre-line text-[15px] leading-7 text-[#5f6673]">{note.type === "manual" ? preview.body : note.aiResult?.summary || preview.body}</p>
+            {points.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {points.map((point, index) => <span key={`${point}-${index}`} className="rounded-full bg-[#f5f5f7] px-3 py-1 text-xs text-[#69707d]">{point}</span>)}
+              </div>
+            )}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {note.tags?.slice(0, 4).map((nt) => <span key={nt.tag.id} className="text-xs text-[#2563eb]">#{nt.tag.fullPath}</span>)}
+              {isFailed && (
+                <span
+                  onClick={onRetry}
+                  className="ml-auto rounded-full bg-red-50 px-3 py-1.5 text-xs text-red-500 hover:bg-red-100"
+                >
+                  {retrying ? "重试中" : "重新转录"}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </button>
+    </article>
+  );
 }
 
-function getSources(notes: Note[]) {
-  const counts = new Map<string, number>();
-  for (const note of notes) counts.set(note.type || "manual", (counts.get(note.type || "manual") || 0) + 1);
-  return Array.from(counts.entries())
-    .map(([source, count]) => ({ source, count }))
-    .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source))
-    .slice(0, 8);
+function groupTimeline(notes: Note[]) {
+  const groups = new Map<string, Note[]>();
+  for (const note of sortByTimeline(notes)) {
+    const label = timelineDateLabel(note.createdAt);
+    groups.set(label, [...(groups.get(label) || []), note]);
+  }
+  return Array.from(groups.entries()).map(([label, groupNotes]) => ({ label, notes: groupNotes }));
+}
+
+function sortByTimeline(notes: Note[]) {
+  return [...notes].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
+function composerTab(active: boolean) {
+  return `pb-2 text-[15px] transition-colors ${active ? "border-b-2 border-[#2563eb] font-semibold text-[#1d1d1f]" : "border-b-2 border-transparent text-[#8f96a3] hover:text-[#1d1d1f]"}`;
+}
+
+function makeTimelinePrompt(notes: Note[], aiName: string) {
+  const usable = notes.filter((note) => note.status !== "processing");
+  if (usable.length === 0) return null;
+  const first = noteDisplayTitle(usable[0]);
+  if (usable.length === 1) {
+    return { question: `围绕「${first}」，${aiName} 可以帮你追问 3 个还值得继续想的问题。` };
+  }
+  return { question: `把最近这 ${Math.min(usable.length, 6)} 条笔记串成一条主题线索，并指出最值得复习的一页。` };
+}
+
+function safeParse(value?: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function makeNotePreview(note: Note) {
+  const raw = note.contentMd || "";
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => cleanMarkdownLine(line))
+    .filter((line) => line && !/^来源[:：]|^平台[:：]|^-{3,}$/.test(line));
+  const firstTitle = lines.find((line) => line.length > 0) || "";
+  const body = lines.filter((line) => line !== firstTitle).join("\n").replace(/\n{3,}/g, "\n\n").slice(0, 260);
+  return {
+    title: firstTitle.slice(0, 80) || stripMarkdown(raw).slice(0, 80),
+    body: body || stripMarkdown(raw).slice(0, 220),
+  };
+}
+
+function cleanMarkdownLine(line: string) {
+  return line
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/^>\s?/, "")
+    .replace(/^\s*[-*+]\s+/, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "")
+    .replace(/[#*_~]/g, "")
+    .trim();
+}
+
+function noteDisplayTitle(note: Note) {
+  return (note.title || makeNotePreview(note).title || "这条笔记").slice(0, 42);
+}
+
+function timelineDateLabel(iso: string) {
+  const date = new Date(iso);
+  const now = new Date();
+  if (isSameDay(date, now)) return "今天";
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (isSameDay(date, yesterday)) return "昨天";
+  return date.toLocaleDateString("zh-CN", { month: "long", day: "numeric" });
+}
+
+function isSameDay(a: Date, b: Date) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function sourceLabel(type: string) {
+  const labels: Record<string, string> = { manual: "笔记输入", douyin: "外部资料 · 抖音", bilibili: "外部资料 · B站", youtube: "外部资料 · YouTube", xiaohongshu: "外部资料 · 小红书", link: "外部资料 · 链接", web: "外部资料 · 网页" };
+  return labels[type] || `外部资料 · ${type}`;
 }
 
 function pickPlaceholder(): string {
-  const placeholders = [
-    "把一闪而过的念头放在这里。",
-    "一句话，也可以长成一页。",
-    "落笔就是整理，不用急。",
-    "今天有什么值得被记住？",
-    "贴一条链接，AI 会帮你收好。",
-  ];
+  const placeholders = ["一句话，也可以长成一页。", "把一闪而过的念头放在这里。", "今天有什么值得被记住？", "落笔就是整理，不用急。"];
   return placeholders[new Date().getHours() % placeholders.length];
 }
 
@@ -681,32 +507,8 @@ function formatTime(iso: string): string {
   const diff = Date.now() - d.getTime();
   const minutes = Math.floor(diff / 60000);
   const hours = Math.floor(diff / 3600000);
-  const days = Math.floor(diff / 86400000);
   if (minutes < 1) return "刚刚";
   if (minutes < 60) return `${minutes} 分钟前`;
-  if (hours < 6) return `${hours} 小时前`;
-  if (hours < 24) {
-    return `今天 ${d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
-  }
-  if (days < 2) return "昨天";
-  if (days < 7) return `${days} 天前`;
-  return d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
-}
-
-function groupByTime(notes: Note[]): Record<string, Note[]> {
-  const groups: Record<string, Note[]> = {};
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterday = new Date(today.getTime() - 86400000);
-  for (const note of notes) {
-    const date = new Date(note.createdAt);
-    const label =
-      date >= today
-        ? "今天"
-        : date >= yesterday
-          ? "昨天"
-          : date.toLocaleDateString("zh-CN", { month: "long", day: "numeric" });
-    (groups[label] ??= []).push(note);
-  }
-  return groups;
+  if (hours < 24) return `${hours} 小时前`;
+  return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }

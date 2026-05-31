@@ -1,9 +1,16 @@
 import { execFile } from "child_process";
-import { access, writeFile, unlink } from "fs/promises";
-import { join } from "path";
+import { access, unlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
+import { join } from "path";
 import { promisify } from "util";
-import { buildTranscriptionEnv, getTranscriptionConfig } from "@/lib/ai-config";
+import {
+  TranscriptionFieldMeta,
+  TranscriptionSettings,
+  buildTranscriptionEnv,
+  formatTranscriptionFieldMeta,
+  resolveTranscriptionRuntimeConfig,
+} from "@/lib/ai-config";
+import { explainTranscriptionError, redactSecrets } from "@/lib/transcription-errors";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,10 +23,21 @@ export interface PreflightCheck {
 export interface PreflightResult {
   ok: boolean;
   checks: PreflightCheck[];
+  diagnostics?: TranscriptionDiagnostics;
 }
 
-export async function runTranscriptionPreflight(userId: string): Promise<PreflightResult> {
-  const config = await getTranscriptionConfig(userId);
+export interface TranscriptionDiagnostics {
+  effective: Record<string, string>;
+  sources: Record<string, TranscriptionFieldMeta>;
+  warnings: string[];
+}
+
+export async function runTranscriptionPreflight(
+  userId: string,
+  overrideConfig?: Partial<TranscriptionSettings>
+): Promise<PreflightResult> {
+  const runtime = await resolveTranscriptionRuntimeConfig(userId, overrideConfig);
+  const { sources, warnings, ...config } = runtime;
   const env = buildTranscriptionEnv(config);
   const checks: PreflightCheck[] = [];
 
@@ -42,13 +60,47 @@ export async function runTranscriptionPreflight(userId: string): Promise<Preflig
     });
   }
 
+  for (const warning of warnings) {
+    checks.push({ name: "配置来源提醒", ok: false, message: warning });
+  }
+
   const basicOk = checks.every((check) => check.ok);
   if (basicOk) {
     checks.push(await checkDashScopeAuth(env));
     checks.push(await checkOssUpload(env));
   }
 
-  return { ok: checks.every((check) => check.ok), checks };
+  return {
+    ok: checks.every((check) => check.ok),
+    checks,
+    diagnostics: buildDiagnostics(runtime),
+  };
+}
+
+function maskTail(value?: string, visible = 4) {
+  const text = String(value || "").trim();
+  if (!text) return "未配置";
+  return `已配置，尾号 ${text.slice(-visible)}`;
+}
+
+function buildDiagnostics(runtime: Awaited<ReturnType<typeof resolveTranscriptionRuntimeConfig>>): TranscriptionDiagnostics {
+  return {
+    effective: {
+      dashscopeApiKey: maskTail(runtime.dashscopeApiKey),
+      ossAccessKeyId: maskTail(runtime.ossAccessKeyId, 6),
+      ossAccessKeySecret: maskTail(runtime.ossAccessKeySecret),
+      ossBucketName: runtime.ossBucketName || "未配置",
+      ossEndpoint: runtime.ossEndpoint || "未配置",
+      ffmpegPath: runtime.ffmpegPath || "使用 PATH 中的 ffmpeg",
+    },
+    sources: Object.fromEntries(
+      Object.entries(runtime.sources).map(([key, meta]) => [
+        key,
+        { ...meta, label: formatTranscriptionFieldMeta(meta) },
+      ])
+    ) as Record<string, TranscriptionFieldMeta>,
+    warnings: runtime.warnings,
+  };
 }
 
 async function checkFfmpeg(ffmpegPath?: string): Promise<PreflightCheck> {
@@ -88,13 +140,17 @@ async function checkDashScopeAuth(env: Record<string, string>): Promise<Prefligh
       return {
         name: "DashScope API Key 有效性",
         ok: false,
-        message: `无效或无权限。请填写阿里云百炼/DashScope API Key，不要填 OSS AccessKey。${text.slice(0, 180)}`,
+        message: `无效或无权限。这里要填阿里云百炼/DashScope API Key，不是 DeepSeek Key，也不是 OSS AccessKey。${redactSecrets(text).slice(0, 180)}`,
       };
     }
 
     if (!resp.ok) {
       const text = await resp.text();
-      return { name: "DashScope API Key 有效性", ok: false, message: `检测失败：HTTP ${resp.status}。${text.slice(0, 180)}` };
+      return {
+        name: "DashScope API Key 有效性",
+        ok: false,
+        message: `检测失败：HTTP ${resp.status}。${redactSecrets(text).slice(0, 180)}`,
+      };
     }
 
     return { name: "DashScope API Key 有效性", ok: true, message: "认证检测通过" };
@@ -134,8 +190,13 @@ async function checkOssUpload(env: Record<string, string>): Promise<PreflightChe
     });
     return { name: "OSS 上传权限", ok: true, message: "PutObject/GetObject/DeleteObject 检测通过" };
   } catch (e: any) {
-    const detail = [e.stdout, e.stderr, e.message].filter(Boolean).join("\n").slice(0, 1600);
-    return { name: "OSS 上传权限", ok: false, message: detail || "OSS 上传检测失败" };
+    const detail = [e.stdout, e.stderr, e.message].filter(Boolean).join("\n");
+    const explained = explainTranscriptionError(detail, "上传 OSS");
+    return {
+      name: "OSS 上传权限",
+      ok: false,
+      message: `${explained.summary}\n${explained.detail}\n解决：${explained.action}`,
+    };
   } finally {
     await unlink(tempFile).catch(() => {});
   }

@@ -61,18 +61,24 @@ def parse_send_targets(args):
     return targets
 
 
-def cleanup_video(video_path, keep_video=False):
-    """Delete the downloaded video unless the user asked to keep it."""
+def cleanup_file(file_path, keep=False, label="临时文件"):
     try:
-        if not video_path or not os.path.exists(str(video_path)):
+        if not file_path or not os.path.exists(str(file_path)):
             return
-        if keep_video:
-            Logger.info(f"保留视频文件: {os.path.basename(str(video_path))}")
+        if keep:
+            Logger.info(f"保留{label}: {os.path.basename(str(file_path))}")
             return
-        os.remove(str(video_path))
-        Logger.info(f"已删除视频文件: {os.path.basename(str(video_path))}")
-    except Exception as e:
-        Logger.warning(f"删除视频文件失败: {e}")
+        os.remove(str(file_path))
+        Logger.info(f"已删除{label}: {os.path.basename(str(file_path))}")
+    except Exception as exc:
+        Logger.warning(f"删除{label}失败: {exc}")
+
+
+def same_file(left, right) -> bool:
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except Exception:
+        return False
 
 
 def main():
@@ -85,7 +91,7 @@ def main():
                 {
                     "error": "缺少必要参数",
                     "usage": (
-                        "python3 main.py --platform <平台> --url <链接> "
+                        "python main.py --platform <平台> --url <链接> "
                         "[--cookies <路径>] [--send notion] [--send github] "
                         "[--send flomo] [--dry-run] [--save-video]"
                     ),
@@ -127,9 +133,19 @@ def main():
     oss_object = None
     uploader = None
     source_path = None
+    audio_path = None
     stage = "初始化"
 
     try:
+        stage = "转录配置预检"
+        transcriber = CloudTranscriber(
+            config.dashscope_api_key,
+            enable_timestamps=str(config.transcribe_enable_timestamps) != "0",
+            enable_speaker_diarization=str(config.transcribe_enable_speaker_diarization) != "0",
+            speaker_count=int(config.transcribe_speaker_count or 0),
+        )
+        transcriber.validate_auth()
+
         stage = "下载视频/音频"
         Logger.step(1, 5, "下载视频/音频", task_id)
         source_path = downloader.download(url, str(download_dir), task_id, cookies_path, audio_only=not save_video)
@@ -139,14 +155,12 @@ def main():
         Logger.step(2, 5, "提取音频", task_id)
         extractor = AudioExtractor(str(audio_dir), config.ffmpeg_path)
         audio_path = extractor.extract(source_path, f"audio_{task_id}")
-        Logger.info(f"音频提取完成: {audio_path}")
+        Logger.info(f"音频准备完成: {audio_path}")
 
         if save_video:
             Logger.info(f"保留视频文件: {Path(source_path).name}")
-        else:
-            if source_path and os.path.exists(source_path):
-                os.remove(source_path)
-                Logger.info(f"已删除临时源文件: {Path(source_path).name}")
+        elif source_path and not same_file(source_path, audio_path):
+            cleanup_file(source_path, label="临时源文件")
             source_path = None
 
         stage = "上传OSS"
@@ -160,38 +174,44 @@ def main():
         oss_url, oss_object = uploader.upload_audio(audio_path)
         Logger.info("OSS上传完成")
 
+        if not save_video and source_path and same_file(source_path, audio_path):
+            cleanup_file(source_path, label="临时音频文件")
+            source_path = None
+
         stage = "云端转录"
         Logger.step(4, 5, "云端转录", task_id)
-        transcriber = CloudTranscriber(config.dashscope_api_key)
         transcript = transcriber.transcribe(oss_url, task_id=task_id)
         transcript_path = transcripts_dir / f"transcript_{task_id}.txt"
         transcript_path.write_text(transcript, encoding="utf-8")
         Logger.info(f"转录完成: {transcript_path}")
         print(f"\n转录预览（前300字）:\n{transcript[:300]}\n")
 
-        stage = "分发内容"
-        Logger.step(5, 5, "分发内容", task_id)
-        title = downloader.get_title(url, cookies_path) or f"{platform}_{task_id}"
-        dispatch_result = dispatch(
-            transcript,
-            title,
-            url,
-            platform,
-            config,
-            cli_targets=send_targets if send_targets else None,
-            dry_run=dry_run,
-        )
-        dispatch_result["task_id"] = task_id
-        dispatch_result["transcript_file"] = str(transcript_path)
-        dispatch_result["source_file"] = str(source_path) if save_video and source_path else None
-        dispatch_result["source_saved"] = bool(save_video and source_path)
+        if send_targets:
+            stage = "分发内容"
+            Logger.step(5, 5, "分发内容", task_id)
+            title = downloader.get_title(url, cookies_path) or f"{platform}_{task_id}"
+            dispatch_result = dispatch(
+                transcript,
+                title,
+                url,
+                platform,
+                config,
+                cli_targets=send_targets,
+                dry_run=dry_run,
+            )
+            dispatch_result["task_id"] = task_id
+            dispatch_result["transcript_file"] = str(transcript_path)
+            dispatch_result["source_file"] = str(source_path) if save_video and source_path else None
+            dispatch_result["source_saved"] = bool(save_video and source_path)
 
-        if not dry_run:
-            for target, res in dispatch_result["send_results"].items():
-                if res == "success":
-                    Logger.info(f"{target} 分发成功")
-                else:
-                    Logger.warning(f"{target} 分发失败（不影响其他目标）: {res}")
+            if not dry_run:
+                for target, res in dispatch_result["send_results"].items():
+                    if res == "success":
+                        Logger.info(f"{target} 分发成功")
+                    else:
+                        Logger.warning(f"{target} 分发失败（不影响其他目标）: {res}")
+        else:
+            Logger.step(5, 5, "跳过分发，仅保留转录文件", task_id)
 
         print(f"\n完成！转录文件: {transcript_path}")
         if save_video and source_path:
@@ -199,20 +219,20 @@ def main():
         else:
             print("")
 
-    except Exception as e:
-        cleanup_video(source_path, keep_video=save_video)
+    except Exception as exc:
+        cleanup_file(source_path, keep=save_video, label="临时源文件")
         error_result = {
             "task_id": task_id,
             "task_status": "failed",
             "platform": platform,
             "url": url,
             "stage": stage,
-            "error": str(e),
+            "error": str(exc),
             "source_file": str(source_path) if save_video and source_path else None,
             "source_saved": bool(save_video and source_path),
         }
         print(json.dumps(error_result, ensure_ascii=False, indent=2), file=sys.stderr)
-        Logger.error(f"任务失败，阶段: {stage} | 原因: {e}", task_id)
+        Logger.error(f"任务失败，阶段: {stage} | 原因: {exc}", task_id)
         traceback.print_exc()
         sys.exit(1)
     finally:

@@ -29,7 +29,7 @@ def _ffmpeg_candidates(configured_path: str = "") -> list[str]:
             return
         path = Path(value)
         if path.is_dir():
-          path = path / "ffmpeg.exe"
+            path = path / "ffmpeg.exe"
         text = str(path)
         if text not in candidates:
             candidates.append(text)
@@ -55,10 +55,7 @@ def _ffmpeg_candidates(configured_path: str = "") -> list[str]:
 
 
 def find_ffmpeg(configured_path: str = "") -> str | None:
-    """Return the first working ffmpeg executable.
-
-    A stale configured path must not block a valid PATH or bundled install.
-    """
+    """Return the first working ffmpeg executable."""
     for candidate in _ffmpeg_candidates(configured_path):
         if _is_executable_ffmpeg(candidate):
             return candidate
@@ -68,7 +65,7 @@ def find_ffmpeg(configured_path: str = "") -> str | None:
 def describe_ffmpeg_search(configured_path: str = "") -> str:
     candidates = _ffmpeg_candidates(configured_path)
     if not candidates:
-        return "没有可检查的候选路径"
+        return "没有可检测的候选路径"
     return "；".join(candidates)
 
 
@@ -96,13 +93,86 @@ def classify_yt_dlp_error(stderr: str) -> tuple[str, str]:
     return "UNKNOWN", "下载器返回了未分类错误，请查看原始 stderr。"
 
 
-def run_yt_dlp_download(platform: str, url: str, output_path: Path, cookies_path=None, max_retries: int = 3, audio_only: bool = True) -> str:
+def _candidate_outputs(output_path: Path) -> list[Path]:
+    files: list[Path] = []
+    for file in output_path.parent.glob(f"{output_path.stem}*"):
+        if not file.is_file():
+            continue
+        name = file.name.lower()
+        if name.endswith(".part") or file.suffix == ".meta":
+            continue
+        try:
+            if file.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        files.append(file)
+    return files
+
+
+def _pick_download_output(output_path: Path, audio_only: bool) -> Path | None:
+    files = _candidate_outputs(output_path)
+    if not files:
+        return None
+    if audio_only:
+        for suffix in (".opus", ".m4a", ".webm", ".mp3", ".wav"):
+            matches = [f for f in files if f.suffix.lower() == suffix]
+            if matches:
+                return max(matches, key=lambda f: f.stat().st_mtime)
+    return max(files, key=lambda f: f.stat().st_mtime)
+
+
+def _cleanup_download_siblings(output_path: Path, keep: Path | None = None) -> None:
+    for file in output_path.parent.glob(f"{output_path.stem}*"):
+        if not file.is_file():
+            continue
+        if keep and file.resolve() == keep.resolve():
+            continue
+        try:
+            file.unlink()
+        except OSError:
+            pass
+
+
+def run_yt_dlp_download(
+    platform: str,
+    url: str,
+    output_path: Path,
+    cookies_path=None,
+    max_retries: int = 3,
+    audio_only: bool = True,
+) -> str:
     cmd = ["yt-dlp", "-o", str(output_path)]
     if audio_only:
-        cmd += ["-f", "bestaudio"]
+        cmd += [
+            "-f",
+            "worstaudio[ext=m4a]/worstaudio[ext=webm]/worstaudio/bestaudio/best",
+            "-x",
+            "--audio-format",
+            "opus",
+            "--audio-quality",
+            "9",
+            "--postprocessor-args",
+            "ffmpeg:-hide_banner -loglevel error -ac 1 -ar 16000 -b:a 16k",
+        ]
     else:
         cmd += ["--merge-output-format", "mp4"]
-    cmd += ["-N", "8", "--no-embed-metadata"]
+
+    cmd += [
+        "-N",
+        "8",
+        "--no-playlist",
+        "--no-write-comments",
+        "--no-write-thumbnail",
+        "--no-embed-metadata",
+        "--no-mtime",
+        "--socket-timeout",
+        "20",
+        "--retries",
+        "2",
+        "--fragment-retries",
+        "2",
+    ]
     if shutil.which("node"):
         cmd += ["--js-runtimes", "node"]
     if cookies_path:
@@ -113,17 +183,15 @@ def run_yt_dlp_download(platform: str, url: str, output_path: Path, cookies_path
     for attempt in range(1, max_retries + 1):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
-        existing = list(output_path.parent.glob(f"{output_path.stem}*"))
-        if existing:
-            data_files = [f for f in existing if f.suffix != ".meta"]
-            if data_files:
-                return str(max(data_files, key=lambda f: f.stat().st_size))
-            return str(existing[0])
-
         if result.returncode == 0:
+            final_file = _pick_download_output(output_path, audio_only=audio_only)
+            if final_file:
+                _cleanup_download_siblings(output_path, keep=final_file)
+                return str(final_file)
             raise RuntimeError(f"{platform} 下载完成但找不到输出文件: {output_path.parent}")
 
         last_error = result.stderr.strip() or result.stdout.strip()
+        _cleanup_download_siblings(output_path)
         code, hint = classify_yt_dlp_error(last_error)
         retryable = code in {"RATE_LIMITED", "NETWORK"}
         if retryable and attempt < max_retries:

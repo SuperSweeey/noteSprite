@@ -7,8 +7,12 @@ import {
   SECRET_MASK,
   UserSettings,
   isMaskedSecret,
+  looksMojibake,
+  resolveTranscriptionRuntimeConfig,
   resolveSettings,
 } from "@/lib/ai-config";
+
+export const dynamic = "force-dynamic";
 
 function mask(value?: string | null): string {
   const text = String(value || "");
@@ -21,11 +25,19 @@ function keepSecret(incoming?: string, existing?: string): string {
   return value;
 }
 
+function keepPrompt(incoming: unknown, existing: string, fallback: string): string {
+  const value = String(incoming ?? "").trim();
+  if (!value) return existing || fallback;
+  if (looksMojibake(value)) return existing && !looksMojibake(existing) ? existing : fallback;
+  return value;
+}
+
 export async function GET() {
   try {
     const userId = await getCurrentUserId();
     const user = await prisma.user.findUnique({ where: { id: userId } });
     const resolved = resolveSettings(user?.settings);
+    const transcriptionRuntime = await resolveTranscriptionRuntimeConfig(userId);
 
     return NextResponse.json({
       ...resolved,
@@ -37,6 +49,19 @@ export async function GET() {
         ...resolved.transcription,
         dashscopeApiKey: mask(resolved.transcription.dashscopeApiKey),
         ossAccessKeySecret: mask(resolved.transcription.ossAccessKeySecret),
+      },
+      transcriptionRuntime: {
+        effective: {
+          dashscopeApiKey: mask(transcriptionRuntime.dashscopeApiKey),
+          ossAccessKeyId: transcriptionRuntime.ossAccessKeyId ? `${transcriptionRuntime.ossAccessKeyId.slice(0, 4)}...${transcriptionRuntime.ossAccessKeyId.slice(-4)}` : "",
+          ossAccessKeySecret: mask(transcriptionRuntime.ossAccessKeySecret),
+          ossBucketName: transcriptionRuntime.ossBucketName,
+          ossEndpoint: transcriptionRuntime.ossEndpoint,
+          ffmpegPath: transcriptionRuntime.ffmpegPath,
+          cookies: transcriptionRuntime.cookies ? "已配置" : "",
+        },
+        sources: transcriptionRuntime.sources,
+        warnings: transcriptionRuntime.warnings,
       },
     });
   } catch (e: any) {
@@ -58,6 +83,7 @@ export async function PUT(req: NextRequest) {
       transcription: { ...DEFAULTS.transcription, ...existing.transcription },
       spirit: { ...DEFAULTS.spirit, ...existing.spirit },
       knowledge: { ...DEFAULTS.knowledge, ...existing.knowledge },
+      appearance: { ...DEFAULTS.appearance, ...existing.appearance },
     };
 
     if (body.providers) {
@@ -74,7 +100,11 @@ export async function PUT(req: NextRequest) {
       updated.assignments = { ...updated.assignments, ...body.assignments };
     }
     if (body.prompts) {
-      updated.prompts = { ...updated.prompts, ...body.prompts };
+      updated.prompts = {
+        chat: keepPrompt(body.prompts.chat, existing.prompts.chat, DEFAULTS.prompts.chat),
+        analysis: keepPrompt(body.prompts.analysis, existing.prompts.analysis, DEFAULTS.prompts.analysis),
+        report: keepPrompt(body.prompts.report, existing.prompts.report, DEFAULTS.prompts.report),
+      };
     }
     if (body.transcription) {
       const current = existing.transcription;
@@ -87,25 +117,34 @@ export async function PUT(req: NextRequest) {
         ossBucketName: incoming.ossBucketName ?? current.ossBucketName ?? "",
         ossEndpoint: incoming.ossEndpoint ?? current.ossEndpoint ?? "",
         ffmpegPath: incoming.ffmpegPath ?? current.ffmpegPath ?? "",
+        enableTimestamps: incoming.enableTimestamps ?? current.enableTimestamps ?? DEFAULTS.transcription.enableTimestamps,
+        enableSpeakerDiarization: incoming.enableSpeakerDiarization ?? current.enableSpeakerDiarization ?? DEFAULTS.transcription.enableSpeakerDiarization,
+        speakerCount: Number(incoming.speakerCount ?? current.speakerCount ?? DEFAULTS.transcription.speakerCount) || 0,
       };
     }
     if (body.spirit) {
       updated.spirit = {
         name: body.spirit.name ?? existing.spirit.name,
         personaId: body.spirit.personaId ?? existing.spirit.personaId,
-        personaPrompt: body.spirit.personaPrompt ?? existing.spirit.personaPrompt,
+        personaPrompt: keepPrompt(body.spirit.personaPrompt, existing.spirit.personaPrompt, DEFAULTS.spirit.personaPrompt),
         learningModeId: body.spirit.learningModeId ?? existing.spirit.learningModeId,
-        learningPrompt: body.spirit.learningPrompt ?? existing.spirit.learningPrompt,
-        prompt: body.spirit.prompt ?? existing.spirit.prompt,
+        learningPrompt: keepPrompt(body.spirit.learningPrompt, existing.spirit.learningPrompt, DEFAULTS.spirit.learningPrompt),
+        prompt: keepPrompt(body.spirit.prompt, existing.spirit.prompt, DEFAULTS.spirit.prompt),
       };
     }
     if (body.knowledge) {
       updated.knowledge = {
         defaultSort: body.knowledge.defaultSort ?? existing.knowledge.defaultSort,
-        autoAnalyze: Boolean(body.knowledge.autoAnalyze),
-        autoReport: Boolean(body.knowledge.autoReport),
+        autoAnalyze: body.knowledge.autoAnalyze ?? existing.knowledge.autoAnalyze,
+        autoReport: body.knowledge.autoReport ?? existing.knowledge.autoReport,
         deleteMode: body.knowledge.deleteMode ?? existing.knowledge.deleteMode,
-        autoImageOcr: Boolean(body.knowledge.autoImageOcr),
+        autoImageOcr: body.knowledge.autoImageOcr ?? existing.knowledge.autoImageOcr,
+      };
+    }
+    if (body.appearance) {
+      updated.appearance = {
+        fontFamily: body.appearance.fontFamily ?? existing.appearance.fontFamily,
+        customFontFamily: body.appearance.customFontFamily ?? existing.appearance.customFontFamily,
       };
     }
 

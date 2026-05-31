@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { DEFAULT_REPORT_PROMPT } from "@/lib/default-prompts";
 
 export interface Provider {
   id: string;
@@ -21,6 +22,25 @@ export interface TranscriptionSettings {
   ossBucketName: string;
   ossEndpoint: string;
   ffmpegPath: string;
+  enableTimestamps: boolean;
+  enableSpeakerDiarization: boolean;
+  speakerCount: number;
+}
+
+export type TranscriptionConfigSource = "settings" | "env" | "missing";
+
+export interface TranscriptionFieldMeta {
+  present: boolean;
+  source: TranscriptionConfigSource;
+  tail: string;
+  length: number;
+  label: string;
+  warning?: string;
+}
+
+export interface TranscriptionRuntimeConfig extends TranscriptionSettings {
+  sources: Record<keyof TranscriptionSettings, TranscriptionFieldMeta>;
+  warnings: string[];
 }
 
 export interface SpiritSettings {
@@ -38,6 +58,24 @@ export interface KnowledgeSettings {
   autoReport: boolean;
   deleteMode: "trash" | "permanent";
   autoImageOcr: boolean;
+}
+
+export interface AppearanceSettings {
+  fontFamily:
+    | "source-serif"
+    | "source-sans"
+    | "lxgw-wenkai"
+    | "lxgw-bright"
+    | "misans"
+    | "harmonyos"
+    | "alibaba-puhuiti"
+    | "system-sans"
+    | "microsoft-yahei"
+    | "songti"
+    | "kaiti"
+    | "system"
+    | "custom";
+  customFontFamily: string;
 }
 
 export interface LearningMode {
@@ -69,6 +107,7 @@ export interface UserSettings {
   transcription: TranscriptionSettings;
   spirit: SpiritSettings;
   knowledge: KnowledgeSettings;
+  appearance: AppearanceSettings;
 }
 
 export const SECRET_MASK = "••••";
@@ -89,6 +128,9 @@ const DEFAULT_TRANSCRIPTION: TranscriptionSettings = {
   ossBucketName: "",
   ossEndpoint: "",
   ffmpegPath: "",
+  enableTimestamps: true,
+  enableSpeakerDiarization: true,
+  speakerCount: 0,
 };
 
 const DEFAULT_KNOWLEDGE: KnowledgeSettings = {
@@ -97,6 +139,11 @@ const DEFAULT_KNOWLEDGE: KnowledgeSettings = {
   autoReport: false,
   deleteMode: "trash",
   autoImageOcr: false,
+};
+
+const DEFAULT_APPEARANCE: AppearanceSettings = {
+  fontFamily: "source-serif",
+  customFontFamily: "",
 };
 
 export const LEARNING_MODES: LearningMode[] = [
@@ -353,29 +400,6 @@ export const DEFAULT_SPIRIT_PROMPT = [
   "优先依据用户笔记回答。笔记里没有的信息，要明确说暂时没在笔记里看到。",
 ].join("\n");
 
-export const DEFAULT_REPORT_PROMPT = [
-  "你的任务不是写简短摘要，而是把用户的原文读完、拆开、重组为一篇可以替代原文阅读的完整解读。",
-  "请用中文输出 Markdown。如果用户选择了某种领学模式，也要把这种模式体现在解读方式里。",
-  "",
-  "输出结构必须包含：",
-  "## AI 先帮你读懂",
-  "用 3 到 5 句话说明这一页笔记到底在讲什么，以及为什么值得留下。",
-  "",
-  "## 核心内容",
-  "按主题拆成多个小标题。每个小标题下写出充分细节、关键数据、因果关系、背景和结论。",
-  "",
-  "## 关键判断",
-  "提炼这页笔记背后的判断、趋势、风险、矛盾或启发，不要只重复原文。",
-  "",
-  "## 可以带走的东西",
-  "列出可复用的观点、行动建议、写作素材或以后可追问的问题。",
-  "",
-  "## AI 的提醒",
-  "用一小段自然的话收尾，指出这页笔记还能和哪些旧想法连接。",
-  "",
-  "重要边界：优先依据用户笔记。笔记里没有的信息，要明确说暂时没在笔记里看到，不要编造。",
-].join("\n");
-
 const DEFAULT_SPIRIT: SpiritSettings = {
   name: "AI",
   personaId: "warm",
@@ -396,6 +420,7 @@ export const DEFAULTS: UserSettings = {
   transcription: { ...DEFAULT_TRANSCRIPTION },
   spirit: { ...DEFAULT_SPIRIT },
   knowledge: { ...DEFAULT_KNOWLEDGE },
+  appearance: { ...DEFAULT_APPEARANCE },
 };
 
 export function isMaskedSecret(value?: string | null): boolean {
@@ -417,15 +442,89 @@ export function usableSecret(value?: string | null, minLength = 8): string {
   return text.length >= minLength ? text : "";
 }
 
+function secretLooksLikeOssAccessKeyId(value?: string | null): boolean {
+  return /^LTAI[A-Za-z0-9]{8,}$/.test(String(value || "").trim());
+}
+
+function secretLooksLikeDashScopeApiKey(value?: string | null): boolean {
+  const text = String(value || "").trim();
+  return /^sk-[A-Za-z0-9_-]{16,}$/.test(text) || /^dashscope-[A-Za-z0-9_-]{12,}$/i.test(text);
+}
+
+function pickSecret(
+  label: string,
+  settingsValue: string | undefined,
+  envValue: string | undefined,
+  minLength: number,
+  validate?: (value: string) => string | undefined
+): { value: string; meta: TranscriptionFieldMeta; warning?: string } {
+  const settingsSecret = usableSecret(settingsValue, minLength);
+  const envSecret = usableSecret(envValue, minLength);
+  const source: TranscriptionConfigSource = settingsSecret ? "settings" : envSecret ? "env" : "missing";
+  const value = settingsSecret || envSecret || "";
+  const warning = value && validate ? validate(value) : undefined;
+  return {
+    value,
+    warning,
+    meta: {
+      present: Boolean(value),
+      source,
+      tail: value ? value.slice(-4) : "",
+      length: value.length,
+      label,
+      warning,
+    },
+  };
+}
+
+function pickText(
+  label: string,
+  settingsValue: string | undefined,
+  envValue: string | undefined
+): { value: string; meta: TranscriptionFieldMeta } {
+  const settingsText = usableText(settingsValue);
+  const envText = usableText(envValue);
+  const source: TranscriptionConfigSource = settingsText ? "settings" : envText ? "env" : "missing";
+  const value = settingsText || envText || "";
+  return {
+    value,
+    meta: {
+      present: Boolean(value),
+      source,
+      tail: value ? value.slice(-4) : "",
+      length: value.length,
+      label,
+    },
+  };
+}
+
+function sourceText(source: TranscriptionConfigSource): string {
+  if (source === "settings") return "设置页";
+  if (source === "env") return ".env";
+  return "未配置";
+}
+
+export function formatTranscriptionFieldMeta(meta: TranscriptionFieldMeta): string {
+  if (!meta.present) return `${meta.label}：未配置`;
+  const tail = meta.tail ? `，尾号 ${meta.tail}` : "";
+  const warning = meta.warning ? `，警告：${meta.warning}` : "";
+  return `${meta.label}：来自 ${sourceText(meta.source)}${tail}${warning}`;
+}
+
 function usableText(value?: string | null): string {
   const text = String(value || "").trim();
   if (!text || isMaskedSecret(text) || /example|placeholder/i.test(text)) return "";
   return text;
 }
 
-function looksMojibake(value?: string | null): boolean {
+export function looksMojibake(value?: string | null): boolean {
   const text = String(value || "");
-  return /[åæçèéä]/.test(text) || /浣|灏|绮|杞|妯|璁|鍥|澶|娴/.test(text);
+  if (!text) return false;
+  if (text.includes("\uFFFD") || text.includes("ï¿½")) return true;
+  if (/[åæçèéä]/.test(text) || /浣|灏|绮|杞|妯|璁|鍥|澶|娴/.test(text)) return true;
+  const latinNoise = (text.match(/[ÃÂâï¼ã]/g) || []).length;
+  const chineseChars = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  return latinNoise >= 4 && chineseChars < 8;
 }
 
 function parseSettings(raw?: string | null): Partial<UserSettings> {
@@ -442,8 +541,21 @@ function cleanText(value: unknown, fallback: string): string {
 }
 
 function cleanSpiritName(value: unknown): string {
-  const name = cleanText(value, DEFAULT_SPIRIT.name);
-  return name === "小傲" ? DEFAULT_SPIRIT.name : name;
+  return cleanText(value, DEFAULT_SPIRIT.name);
+}
+
+function userText(value: unknown, fallback: string): string {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function promptText(value: unknown, fallback: string): string {
+  const text = String(value ?? "").trim();
+  return text && !looksMojibake(text) ? text : fallback;
+}
+
+function defaultIfMissing<T>(value: T | undefined | null, fallback: T): T {
+  return value ?? fallback;
 }
 
 export function resolveSettings(raw?: string | null): UserSettings {
@@ -459,7 +571,7 @@ export function resolveSettings(raw?: string | null): UserSettings {
     legacySpirit.style ? `风格：${legacySpirit.style}` : "",
     legacySpirit.boundaries ? `边界：${legacySpirit.boundaries}` : "",
   ].filter(Boolean).join("\n");
-  const learningPrompt = cleanText(rawSpirit.learningPrompt, mode.prompt);
+  const learningPrompt = promptText(rawSpirit.learningPrompt, mode.prompt);
 
   return {
     providers,
@@ -467,17 +579,20 @@ export function resolveSettings(raw?: string | null): UserSettings {
     prompts: {
       ...DEFAULTS.prompts,
       ...settings.prompts,
-      report: cleanText(settings.prompts?.report, DEFAULT_REPORT_PROMPT),
+      chat: promptText(settings.prompts?.chat, DEFAULTS.prompts.chat),
+      analysis: promptText(settings.prompts?.analysis, DEFAULTS.prompts.analysis),
+      report: promptText(settings.prompts?.report, DEFAULT_REPORT_PROMPT),
     },
     transcription: { ...DEFAULTS.transcription, ...settings.transcription },
     knowledge: { ...DEFAULTS.knowledge, ...settings.knowledge },
+    appearance: { ...DEFAULTS.appearance, ...settings.appearance },
     spirit: {
       name: cleanSpiritName(rawSpirit.name),
-      personaId: rawSpirit.personaId || DEFAULT_SPIRIT.personaId,
-      personaPrompt: cleanText(rawSpirit.personaPrompt, legacyPersona || DEFAULT_SPIRIT.personaPrompt),
-      learningModeId: rawSpirit.learningModeId || mode.id,
-      learningPrompt: learningPrompt.length < 260 ? mode.prompt : learningPrompt,
-      prompt: cleanText(rawSpirit.prompt, DEFAULT_SPIRIT.prompt),
+      personaId: defaultIfMissing(rawSpirit.personaId, DEFAULT_SPIRIT.personaId),
+      personaPrompt: promptText(rawSpirit.personaPrompt, legacyPersona || DEFAULT_SPIRIT.personaPrompt),
+      learningModeId: defaultIfMissing(rawSpirit.learningModeId, mode.id),
+      learningPrompt,
+      prompt: promptText(rawSpirit.prompt, DEFAULT_SPIRIT.prompt),
     },
   };
 }
@@ -526,25 +641,150 @@ export function buildSpiritPrompt(spirit: SpiritSettings, extra = ""): string {
   ].filter(Boolean).join("\n");
 }
 
-export async function getTranscriptionConfig(userId: string): Promise<TranscriptionSettings> {
+export async function resolveTranscriptionRuntimeConfig(
+  userId: string,
+  override?: Partial<TranscriptionSettings>
+): Promise<TranscriptionRuntimeConfig> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
-  const config = resolveSettings(user?.settings).transcription;
-  const settingsBucket = usableText(config.ossBucketName);
-  const useEnvOss =
-    !settingsBucket ||
-    isPlaceholderSecret(config.ossAccessKeyId) ||
-    isPlaceholderSecret(config.ossAccessKeySecret) ||
-    isPlaceholderSecret(settingsBucket);
+  const stored = resolveSettings(user?.settings).transcription;
+  const config = { ...stored, ...(override || {}) };
+  const warnings: string[] = [];
+
+  const dashscope = pickSecret(
+    "DashScope API Key",
+    config.dashscopeApiKey,
+    process.env.DASHSCOPE_API_KEY,
+    20,
+    (value) => {
+      if (secretLooksLikeOssAccessKeyId(value)) return "看起来像 OSS AccessKey ID，不是 DashScope API Key";
+      if (!secretLooksLikeDashScopeApiKey(value)) return "格式不像常见 DashScope API Key，请用检测确认";
+      return undefined;
+    }
+  );
+  if (dashscope.warning) warnings.push(`DashScope API Key：${dashscope.warning}`);
+
+  const cookies = pickText("Cookies", config.cookies, process.env.COOKIES);
+  const ffmpegPath = pickText("ffmpeg 路径", config.ffmpegPath, process.env.FFMPEG_PATH);
+
+  const settingsOss = {
+    accessKeyId: usableSecret(config.ossAccessKeyId, 12),
+    accessKeySecret: usableSecret(config.ossAccessKeySecret, 20),
+    bucketName: usableText(config.ossBucketName),
+    endpoint: usableText(config.ossEndpoint),
+  };
+  const envOss = {
+    accessKeyId: usableSecret(process.env.OSS_ACCESS_KEY_ID, 12),
+    accessKeySecret: usableSecret(process.env.OSS_ACCESS_KEY_SECRET, 20),
+    bucketName: usableText(process.env.OSS_BUCKET_NAME),
+    endpoint: usableText(process.env.OSS_ENDPOINT),
+  };
+  const settingsOssComplete = Boolean(
+    settingsOss.accessKeyId &&
+    settingsOss.accessKeySecret &&
+    settingsOss.bucketName &&
+    settingsOss.endpoint
+  );
+  const oss = settingsOssComplete ? settingsOss : envOss;
+  const ossSource: TranscriptionConfigSource = settingsOssComplete ? "settings" : (
+    oss.accessKeyId || oss.accessKeySecret || oss.bucketName || oss.endpoint ? "env" : "missing"
+  );
+
+  if (config.ossAccessKeyId || config.ossAccessKeySecret || config.ossBucketName || config.ossEndpoint) {
+    const missing = [
+      ["OSS AccessKey ID", settingsOss.accessKeyId],
+      ["OSS AccessKey Secret", settingsOss.accessKeySecret],
+      ["OSS Bucket", settingsOss.bucketName],
+      ["OSS Endpoint", settingsOss.endpoint],
+    ].filter(([, value]) => !value).map(([name]) => name);
+    if (missing.length > 0) {
+      warnings.push(`设置页里的 OSS 配置不完整，当前整组回退到 .env。缺少：${missing.join("、")}`);
+    }
+  }
+
+  if (oss.accessKeyId && secretLooksLikeDashScopeApiKey(oss.accessKeyId)) {
+    warnings.push("OSS AccessKey ID 看起来像 DashScope API Key，请检查是否填反。");
+  }
+  const ossSecretWarning = oss.accessKeySecret && secretLooksLikeOssAccessKeyId(oss.accessKeySecret)
+    ? "看起来像 OSS AccessKey ID，不是 Secret"
+    : undefined;
+  if (ossSecretWarning) warnings.push(`OSS AccessKey Secret：${ossSecretWarning}`);
+
+  const sources: TranscriptionRuntimeConfig["sources"] = {
+    cookies: cookies.meta,
+    dashscopeApiKey: dashscope.meta,
+    ossAccessKeyId: {
+      present: Boolean(oss.accessKeyId),
+      source: ossSource,
+      tail: oss.accessKeyId ? oss.accessKeyId.slice(-4) : "",
+      length: oss.accessKeyId.length,
+      label: "OSS AccessKey ID",
+    },
+    ossAccessKeySecret: {
+      present: Boolean(oss.accessKeySecret),
+      source: ossSource,
+      tail: oss.accessKeySecret ? oss.accessKeySecret.slice(-4) : "",
+      length: oss.accessKeySecret.length,
+      label: "OSS AccessKey Secret",
+      warning: ossSecretWarning,
+    },
+    ossBucketName: {
+      present: Boolean(oss.bucketName),
+      source: ossSource,
+      tail: "",
+      length: oss.bucketName.length,
+      label: "OSS Bucket",
+    },
+    ossEndpoint: {
+      present: Boolean(oss.endpoint),
+      source: ossSource,
+      tail: "",
+      length: oss.endpoint.length,
+      label: "OSS Endpoint",
+    },
+    ffmpegPath: ffmpegPath.meta,
+    enableTimestamps: {
+      present: true,
+      source: "settings",
+      tail: "",
+      length: String(config.enableTimestamps ?? DEFAULT_TRANSCRIPTION.enableTimestamps).length,
+      label: "时间戳",
+    },
+    enableSpeakerDiarization: {
+      present: true,
+      source: "settings",
+      tail: "",
+      length: String(config.enableSpeakerDiarization ?? DEFAULT_TRANSCRIPTION.enableSpeakerDiarization).length,
+      label: "说话人分离",
+    },
+    speakerCount: {
+      present: true,
+      source: "settings",
+      tail: "",
+      length: String(config.speakerCount ?? DEFAULT_TRANSCRIPTION.speakerCount).length,
+      label: "说话人数参考值",
+    },
+  };
 
   return {
-    cookies: config.cookies || process.env.COOKIES || "",
-    dashscopeApiKey: usableSecret(config.dashscopeApiKey, 20) || usableSecret(process.env.DASHSCOPE_API_KEY, 20),
-    ossAccessKeyId: usableSecret(config.ossAccessKeyId, 12) || usableSecret(process.env.OSS_ACCESS_KEY_ID, 12),
-    ossAccessKeySecret: usableSecret(config.ossAccessKeySecret, 20) || usableSecret(process.env.OSS_ACCESS_KEY_SECRET, 20),
-    ossBucketName: useEnvOss ? usableText(process.env.OSS_BUCKET_NAME) : settingsBucket,
-    ossEndpoint: useEnvOss ? usableText(process.env.OSS_ENDPOINT) : usableText(config.ossEndpoint) || usableText(process.env.OSS_ENDPOINT),
-    ffmpegPath: usableText(config.ffmpegPath) || usableText(process.env.FFMPEG_PATH),
+    cookies: cookies.value,
+    dashscopeApiKey: dashscope.value,
+    ossAccessKeyId: oss.accessKeyId,
+    ossAccessKeySecret: oss.accessKeySecret,
+    ossBucketName: oss.bucketName,
+    ossEndpoint: oss.endpoint,
+    ffmpegPath: ffmpegPath.value,
+    enableTimestamps: config.enableTimestamps ?? DEFAULT_TRANSCRIPTION.enableTimestamps,
+    enableSpeakerDiarization: config.enableSpeakerDiarization ?? DEFAULT_TRANSCRIPTION.enableSpeakerDiarization,
+    speakerCount: Number(config.speakerCount || 0),
+    sources,
+    warnings,
   };
+}
+
+export async function getTranscriptionConfig(userId: string): Promise<TranscriptionSettings> {
+  const runtime = await resolveTranscriptionRuntimeConfig(userId);
+  const { sources, warnings, ...config } = runtime;
+  return config;
 }
 
 export function buildTranscriptionEnv(config: TranscriptionSettings): Record<string, string> {
@@ -556,5 +796,8 @@ export function buildTranscriptionEnv(config: TranscriptionSettings): Record<str
   if (config.ossBucketName) env.OSS_BUCKET_NAME = config.ossBucketName;
   if (config.ossEndpoint) env.OSS_ENDPOINT = config.ossEndpoint;
   if (config.ffmpegPath) env.FFMPEG_PATH = config.ffmpegPath;
+  env.TRANSCRIBE_ENABLE_TIMESTAMPS = config.enableTimestamps ? "1" : "0";
+  env.TRANSCRIBE_ENABLE_SPEAKER_DIARIZATION = config.enableSpeakerDiarization ? "1" : "0";
+  env.TRANSCRIBE_SPEAKER_COUNT = String(config.speakerCount || 0);
   return env;
 }
