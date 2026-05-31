@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { MarkdownView } from "@/components/MarkdownView";
 import { XiaoAoMark } from "@/components/XiaoAoMark";
+import { upsertStreamingAssistant } from "@/lib/chat-messages";
 import { stripMarkdown } from "@/lib/tags";
 
 const suggestions = [
@@ -15,6 +16,8 @@ const suggestions = [
   "根据我的笔记，帮我看清最近在往哪个方向走。",
   "帮我写一段近期总结。",
 ];
+
+const CONVERSATION_PAGE_SIZE = 20;
 
 const sessionLearningModes = [
   {
@@ -111,6 +114,9 @@ function AIPageContent() {
   const [loading, setLoading] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<any[]>([]);
+  const [conversationTotal, setConversationTotal] = useState(0);
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationError, setConversationError] = useState("");
   const [showConvList, setShowConvList] = useState(false);
   const [showMentionPicker, setShowMentionPicker] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
@@ -120,15 +126,26 @@ function AIPageContent() {
   const [contextRefs, setContextRefs] = useState<{ type: "note" | "knowledgeBase"; id: string; label: string }[]>([]);
   const [aiName, setAiName] = useState("AI");
   const [sessionModeId, setSessionModeId] = useState<string>("default");
+  const [chatNotice, setChatNotice] = useState("");
   const chatRef = useRef<HTMLDivElement>(null);
   const initialQuestionSent = useRef(false);
   const streamingRef = useRef(false);
 
-  const loadConversations = () => {
-    fetch("/api/ai/chat?list=1")
+  const loadConversations = (offset = 0) => {
+    setConversationLoading(true);
+    setConversationError("");
+    fetch(`/api/ai/chat?list=1&limit=${CONVERSATION_PAGE_SIZE}&offset=${offset}`)
       .then((resp) => resp.json())
-      .then((data) => setConversations(data.conversations || []))
-      .catch(() => setConversations([]));
+      .then((data) => {
+        const next = data.conversations || [];
+        setConversations((current) => offset > 0 ? [...current, ...next] : next);
+        setConversationTotal(data.total || next.length);
+      })
+      .catch(() => {
+        if (offset === 0) setConversations([]);
+        setConversationError("历史记录暂时加载失败。");
+      })
+      .finally(() => setConversationLoading(false));
   };
 
   useEffect(() => {
@@ -166,8 +183,9 @@ function AIPageContent() {
     const question = (text || input).trim();
     if (!question || loading) return;
     const displayQuestion = contextRefs.length > 0 ? `${contextRefs.map((ref) => `@${ref.label}`).join(" ")} ${question}` : question;
-    setMessages((current) => [...current, { role: "user", content: displayQuestion }, { role: "assistant", content: "" }]);
+    setMessages((current) => [...current, { role: "user", content: displayQuestion }]);
     setInput("");
+    setChatNotice("");
     const refs = contextRefs;
     const sessionMode = sessionLearningModes.find((mode) => mode.id === sessionModeId);
     setContextRefs([]);
@@ -190,8 +208,12 @@ function AIPageContent() {
       if (!resp.ok || resp.headers.get("content-type")?.includes("application/json")) {
         const data = await resp.json();
         if (data.conversationId) setConversationId(data.conversationId);
-        setMessages((current) => replaceLastAssistant(current, data.answer || "精灵刚才停了一下，我们再试一次。"));
-        loadConversations();
+        setMessages((current) => upsertStreamingAssistant(current, data.answer || "精灵刚才停了一下，我们再试一次。"));
+        if (data.persist === false || data.authError) {
+          setChatNotice("这次失败没有写入历史记录。可以先去设置页检测模型 Key。");
+        } else {
+          loadConversations();
+        }
         setLoading(false);
         streamingRef.current = false;
         return;
@@ -200,29 +222,39 @@ function AIPageContent() {
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
       let content = "";
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        decoder.decode(value, { stream: true }).split("\n").forEach((line) => {
-          if (!line.startsWith("data: ")) return;
-          const payload = line.slice(6);
-          if (payload === "[DONE]") return;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const event of events) {
+          const payload = event
+            .split("\n")
+            .filter((line) => line.startsWith("data: "))
+            .map((line) => line.slice(6))
+            .join("\n");
+          if (!payload || payload === "[DONE]") continue;
           try {
             const json = JSON.parse(payload);
             if (json.content) {
-              content += json.content;
-              setMessages((current) => replaceLastAssistant(current, content));
+              content = json.replace ? json.content : content + json.content;
+              setMessages((current) => upsertStreamingAssistant(current, content));
             }
             if (json.conversationId) {
               setConversationId(json.conversationId);
               loadConversations();
             }
+            if (json.error) {
+              setMessages((current) => upsertStreamingAssistant(current, json.error));
+            }
           } catch {}
-        });
+        }
       }
     } catch {
-      setMessages((current) => [...current, { role: "assistant", content: "连接不太稳，我们再试一次。" }]);
+      setMessages((current) => upsertStreamingAssistant(current, "连接不太稳，我们再试一次。"));
     } finally {
       setLoading(false);
       streamingRef.current = false;
@@ -241,6 +273,15 @@ function AIPageContent() {
     setConversationId(null);
     setMessages([]);
     setShowConvList(false);
+  };
+
+  const deleteConversation = async (id: string) => {
+    await fetch(`/api/ai/chat?conversationId=${id}`, { method: "DELETE" });
+    if (conversationId === id) {
+      setConversationId(null);
+      setMessages([]);
+    }
+    loadConversations();
   };
 
   const addContextRef = (ref: { type: "note" | "knowledgeBase"; id: string; label: string }) => {
@@ -282,22 +323,47 @@ function AIPageContent() {
         {showConvList && (
           <section className="border-b border-[var(--paper-border)] bg-white/60">
             <div className="mx-auto max-h-[230px] max-w-[900px] overflow-y-auto px-6 py-3">
-              {conversations.length === 0 ? (
+              {conversationLoading && conversations.length === 0 ? (
+                <p className="py-6 text-center text-sm text-[var(--ink-faint)]">正在加载历史...</p>
+              ) : conversationError ? (
+                <p className="py-6 text-center text-sm text-red-500">{conversationError}</p>
+              ) : conversations.length === 0 ? (
                 <p className="py-6 text-center text-sm text-[var(--ink-faint)]">还没有对话。</p>
               ) : (
-                conversations.map((conversation) => (
-                  <button
-                    key={conversation.id}
-                    onClick={() => {
-                      setConversationId(conversation.id);
-                      setShowConvList(false);
-                    }}
-                    className="mb-2 block w-full rounded-[10px] border border-[var(--paper-border)] bg-white px-4 py-3 text-left text-sm hover:bg-[var(--paper-soft)]"
-                  >
-                    <p className="truncate text-[var(--ink)]">{conversation.messages?.[0]?.content?.slice(0, 70) || "新的对话"}</p>
-                    <p className="mt-1 text-xs text-[var(--ink-faint)]">{new Date(conversation.updatedAt).toLocaleString("zh-CN")}</p>
-                  </button>
-                ))
+                <>
+                  {conversations.map((conversation) => (
+                    <div
+                      key={conversation.id}
+                      className="mb-2 flex w-full items-center gap-3 rounded-[10px] border border-[var(--paper-border)] bg-white px-4 py-3 text-left text-sm hover:bg-[var(--paper-soft)]"
+                    >
+                      <button
+                        onClick={() => {
+                          setConversationId(conversation.id);
+                          setShowConvList(false);
+                        }}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <p className="truncate text-[var(--ink)]">{conversation.messages?.[0]?.content?.slice(0, 70) || conversation.title || "新的对话"}</p>
+                        <p className="mt-1 text-xs text-[var(--ink-faint)]">{new Date(conversation.updatedAt).toLocaleString("zh-CN")}</p>
+                      </button>
+                      <button
+                        onClick={() => deleteConversation(conversation.id)}
+                        className="shrink-0 rounded-full px-2 py-1 text-xs text-red-400 hover:bg-red-50 hover:text-red-600"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                  {conversations.length < conversationTotal && (
+                    <button
+                      onClick={() => loadConversations(conversations.length)}
+                      disabled={conversationLoading}
+                      className="mx-auto mt-1 block rounded-full border border-[var(--paper-border)] px-4 py-2 text-sm text-[var(--ink-light)] hover:bg-white disabled:opacity-50"
+                    >
+                      {conversationLoading ? "加载中" : "加载更多历史"}
+                    </button>
+                  )}
+                </>
               )}
             </div>
           </section>
@@ -305,6 +371,11 @@ function AIPageContent() {
 
         <div ref={chatRef} className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[900px] px-6 py-8">
+            {chatNotice && (
+              <div className="mb-4 rounded-[8px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                {chatNotice}
+              </div>
+            )}
             {messages.length === 0 ? (
               <section className="paper-card p-7">
                 <h2 className="text-2xl font-semibold text-[var(--ink)]">你想和笔记聊什么？</h2>
@@ -327,16 +398,26 @@ function AIPageContent() {
               <div className="space-y-4">
                 {messages.map((message, index) => (
                   <div key={index} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div className={`max-w-[82%] rounded-[12px] px-4 py-3 text-sm leading-7 ${
-                      message.role === "user" ? "bg-[var(--ink)] text-white" : "border border-[var(--paper-border)] bg-white text-[var(--ink)]"
-                    }`}>
-                      {message.role === "assistant" ? <MarkdownView content={message.content} /> : message.content}
-                    </div>
+                    {message.role === "assistant" ? (
+                      <div className="flex max-w-[86%] items-start gap-3">
+                        <div className="mt-1 shrink-0 rounded-full bg-white shadow-sm">
+                          <XiaoAoMark size="sm" variant="logo" />
+                        </div>
+                        <div className="rounded-[12px] border border-[var(--paper-border)] bg-white px-4 py-3 text-sm leading-7 text-[var(--ink)]">
+                          <MarkdownView content={message.content} />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="max-w-[82%] rounded-[12px] bg-[var(--ink)] px-4 py-3 text-sm leading-7 text-white">
+                        {message.content}
+                      </div>
+                    )}
                   </div>
                 ))}
                 {loading && (
                   <div className="flex justify-start">
-                    <div className="rounded-[12px] border border-[var(--paper-border)] bg-white px-4 py-3 text-sm text-[var(--ink-faint)]">
+                    <div className="flex items-center gap-2 px-1 text-sm text-[var(--ink-faint)]">
+                      <span className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent-blue)] border-t-transparent" />
                       AI 正在思考...
                     </div>
                   </div>
@@ -437,12 +518,12 @@ function MentionPicker({
   onPick: (ref: { type: "note" | "knowledgeBase"; id: string; label: string }) => void;
 }) {
   return (
-    <div className="absolute bottom-[86px] left-6 z-20 w-[520px] max-w-[calc(100vw-320px)] rounded-[20px] bg-white p-3 shadow-[0_28px_90px_rgba(15,23,42,0.16)] ring-1 ring-black/[0.06]">
+    <div className="absolute bottom-[86px] left-3 right-3 z-20 rounded-[8px] bg-white p-3 shadow-[0_28px_90px_rgba(15,23,42,0.16)] ring-1 ring-black/[0.06] md:left-6 md:right-auto md:w-[520px] md:max-w-[calc(100vw-360px)]">
       <div className="flex items-center gap-2 border-b border-[var(--paper-border)] pb-3">
         <button onClick={() => setTab("bases")} className={mentionTabClass(tab === "bases")}>知识库</button>
         <button onClick={() => setTab("notes")} className={mentionTabClass(tab === "notes")}>笔记</button>
         <input
-          className="ml-auto w-[220px] rounded-full bg-[#f5f5f7] px-3 py-2 text-sm outline-none"
+          className="ml-auto min-w-0 flex-1 rounded-full bg-[#f5f5f7] px-3 py-2 text-sm outline-none md:w-[220px] md:flex-none"
           placeholder="搜索引用..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -495,15 +576,4 @@ function modeChipClass(active: boolean) {
   return `rounded-full px-3 py-1.5 text-xs transition-colors ${
     active ? "bg-[var(--ink)] text-white" : "border border-[var(--paper-border)] bg-white text-[var(--ink-faint)] hover:bg-[var(--paper-soft)] hover:text-[var(--ink)]"
   }`;
-}
-
-function replaceLastAssistant(messages: { role: string; content: string }[], content: string) {
-  const updated = [...messages];
-  for (let index = updated.length - 1; index >= 0; index -= 1) {
-    if (updated[index].role === "assistant") {
-      updated[index] = { role: "assistant", content };
-      return updated;
-    }
-  }
-  return [...updated, { role: "assistant", content }];
 }

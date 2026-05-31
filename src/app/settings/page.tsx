@@ -31,7 +31,7 @@ interface SpiritSettings {
 
 interface Settings {
   providers: Provider[];
-  assignments: { chat: Assignment; analysis: Assignment; report: Assignment };
+  assignments: { chat: Assignment; analysis: Assignment; report: Assignment; vision: Assignment };
   prompts: { chat: string; analysis: string; report: string };
   spirit: SpiritSettings;
   transcription: {
@@ -317,6 +317,7 @@ const FUNCTIONS = [
   { key: "chat" as const, label: "AI 对话", desc: "右侧面板和 AI 页的对话能力" },
   { key: "analysis" as const, label: "笔记整理", desc: "生成标题、摘要、关键词和建议标签" },
   { key: "report" as const, label: "深度解读", desc: "生成可替代原文阅读的完整解读稿" },
+  { key: "vision" as const, label: "图片理解", desc: "上传图片后的 OCR、多模态理解和图片笔记整理" },
 ];
 
 let idCounter = 0;
@@ -354,6 +355,12 @@ function explainCheck(check: PreflightCheck) {
   return "这一项还没通过。先按左侧教程核对配置，再重新检测。";
 }
 
+function hasVisionConfig(settings: Settings) {
+  const assignment = settings.assignments.vision;
+  const provider = settings.providers.find((item) => item.id === assignment?.providerId);
+  return Boolean(provider?.apiKey && provider.baseUrl && assignment?.model);
+}
+
 export default function SettingsPage() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>("spirit");
@@ -378,6 +385,14 @@ export default function SettingsPage() {
       data.spirit.learningPrompt = normalizeLearningPrompt(data.spirit);
       data.prompts = { chat: "", analysis: "", report: DEFAULT_REPORT_PROMPT, ...(data.prompts || {}) };
       if (!data.prompts.report || data.prompts.report.length < 120) data.prompts.report = DEFAULT_REPORT_PROMPT;
+      const fallbackProviderId = data.providers[0]?.id || "default";
+      data.assignments = {
+        chat: { providerId: fallbackProviderId, model: data.providers[0]?.models?.[0] || "" },
+        analysis: { providerId: fallbackProviderId, model: data.providers[0]?.models?.[0] || "" },
+        report: { providerId: fallbackProviderId, model: data.providers[0]?.models?.[0] || "" },
+        vision: { providerId: fallbackProviderId, model: "qwen-vl-plus" },
+        ...(data.assignments || {}),
+      };
       data.transcription = {
         cookies: "",
         dashscopeApiKey: "",
@@ -757,7 +772,7 @@ export default function SettingsPage() {
                 <div className="mt-4 space-y-3">
                   <ToggleRow title="保存笔记后自动生成标题/摘要/关键词" desc="关闭后，笔记会先保持原样，后续再手动整理。" checked={settings.knowledge.autoAnalyze} onChange={(checked) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, autoAnalyze: checked } }))} />
                   <ToggleRow title="转录成功后自动生成 AI 解读" desc="打开后会更像 Get 笔记，但会增加模型调用次数。" checked={settings.knowledge.autoReport} onChange={(checked) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, autoReport: checked } }))} />
-                  <ToggleRow title="图片上传后自动 OCR/多模态理解" desc="功能入口先保留；图片处理实现会在后续阶段接入。" checked={settings.knowledge.autoImageOcr} onChange={(checked) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, autoImageOcr: checked } }))} />
+                  <ToggleRow title="图片上传后自动 OCR/多模态理解" desc={hasVisionConfig(settings) ? "会使用模型页分配的图片理解模型。" : "先在模型页配置图片理解模型后才能开启。"} checked={settings.knowledge.autoImageOcr && hasVisionConfig(settings)} disabled={!hasVisionConfig(settings)} onChange={(checked) => setSettings((current) => ({ ...current!, knowledge: { ...current!.knowledge, autoImageOcr: checked } }))} />
                 </div>
               </div>
             </section>
@@ -904,14 +919,14 @@ function Field({ label, value, placeholder, onChange }: { label: string; value: 
   );
 }
 
-function ToggleRow({ title, desc, checked, onChange }: { title: string; desc: string; checked: boolean; onChange: (checked: boolean) => void }) {
+function ToggleRow({ title, desc, checked, disabled = false, onChange }: { title: string; desc: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
   return (
-    <label className="flex cursor-pointer items-center justify-between gap-4 rounded-[10px] border border-[var(--paper-border)] bg-white px-4 py-3">
+    <label className={`flex items-center justify-between gap-4 rounded-[10px] border border-[var(--paper-border)] bg-white px-4 py-3 ${disabled ? "cursor-not-allowed opacity-55" : "cursor-pointer"}`}>
       <span>
         <span className="block text-sm font-medium text-[var(--ink)]">{title}</span>
         <span className="mt-1 block text-xs leading-5 text-[var(--ink-faint)]">{desc}</span>
       </span>
-      <input type="checkbox" className="h-4 w-4 accent-[var(--accent-blue)]" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" className="h-4 w-4 accent-[var(--accent-blue)]" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
     </label>
   );
 }

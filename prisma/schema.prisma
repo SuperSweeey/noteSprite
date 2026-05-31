@@ -90,7 +90,7 @@ model Tag {
   id        String    @id @default(uuid())
   userId    String    @map("user_id")
   name      String    // 标签名，如 "功能设计"
-  fullPath  String    @unique @map("full_path") // 完整路径，如 "产品/AI笔记/功能设计"
+  fullPath  String    @map("full_path") // 完整路径，如 "产品/AI笔记/功能设计"
   parentId  String?   @map("parent_id")
   noteCount Int       @default(0) @map("note_count")
   createdAt DateTime  @default(now()) @map("created_at")
@@ -98,6 +98,7 @@ model Tag {
   parent   Tag?      @relation("TagHierarchy", fields: [parentId], references: [id])
   children Tag[]     @relation("TagHierarchy")
   notes    NoteTag[]
+  @@unique([userId, fullPath])
   @@map("tags")
 }
 

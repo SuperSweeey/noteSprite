@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { MarkdownView } from "@/components/MarkdownView";
 import { XiaoAoMark } from "@/components/XiaoAoMark";
+import { upsertStreamingAssistant } from "@/lib/chat-messages";
 import { stripMarkdown } from "@/lib/tags";
 
 const prompts = [
@@ -101,7 +102,7 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
     const refs = contextRefs;
     const refText = refs.map((ref) => `@${ref.label}`).join(" ");
     const displayQuestion = refText ? `${refText}\n${question}` : question;
-    setMessages((m) => [...m, { role: "user", content: displayQuestion }, { role: "assistant", content: "" }]);
+    setMessages((m) => [...m, { role: "user", content: displayQuestion }]);
     setInput("");
     setContextRefs([]);
     setShowMentionPicker(false);
@@ -124,7 +125,7 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
       if (!resp.ok || resp.headers.get("content-type")?.includes("application/json")) {
         const data = await resp.json();
         if (data.conversationId) setConversationId(data.conversationId);
-        setMessages((m) => replaceLastAssistant(m, data.answer || "我刚才走神了一下，我们再试一次。"));
+        setMessages((m) => upsertStreamingAssistant(m, data.answer || "我刚才走神了一下，我们再试一次。"));
         loadConversations();
         setLoading(false);
         streamingRef.current = false;
@@ -134,32 +135,39 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
       const reader = resp.body!.getReader();
       const decoder = new TextDecoder();
       let content = "";
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        decoder.decode(value, { stream: true }).split("\n").forEach((line) => {
-          if (!line.startsWith("data: ")) return;
-          const payload = line.slice(6);
-          if (payload === "[DONE]") return;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const event of events) {
+          const payload = event
+            .split("\n")
+            .filter((line) => line.startsWith("data: "))
+            .map((line) => line.slice(6))
+            .join("\n");
+          if (!payload || payload === "[DONE]") continue;
           try {
             const json = JSON.parse(payload);
             if (json.content) {
-              content += json.content;
-              setMessages((m) => replaceLastAssistant(m, content));
+              content = json.replace ? json.content : content + json.content;
+              setMessages((m) => upsertStreamingAssistant(m, content));
             }
             if (json.conversationId) {
               setConversationId(json.conversationId);
               loadConversations();
             }
             if (json.error) {
-              setMessages((m) => replaceLastAssistant(m, content || json.error));
+              setMessages((m) => upsertStreamingAssistant(m, content || json.error));
             }
           } catch {}
-        });
+        }
       }
     } catch {
-      setMessages((m) => replaceLastAssistant(m, "我这里刚才晃了一下，我们再试一次。"));
+      setMessages((m) => upsertStreamingAssistant(m, "我这里刚才晃了一下，我们再试一次。"));
     } finally {
       setLoading(false);
       streamingRef.current = false;
@@ -319,19 +327,24 @@ export function SpiritPanel({ noteId, initialQuestion, onInitialQuestionConsumed
 
         {messages.map((message, index) => (
           <div key={index} className={`text-sm leading-relaxed ${message.role === "user" ? "flex justify-end" : "flex justify-start"}`}>
-            <div
-              className={`max-w-[92%] rounded-[8px] px-3 py-2.5 ${
-                message.role === "user"
-                  ? "bg-blue-50 text-[var(--ink)] shadow-[0_10px_24px_rgba(95,143,255,0.10)]"
-                  : "border border-white bg-white/75 text-[var(--ink-light)] shadow-[0_12px_28px_rgba(95,143,255,0.13)]"
-              }`}
-            >
-              {message.role === "assistant" ? <MarkdownView content={message.content} /> : message.content}
-            </div>
+            {message.role === "assistant" ? (
+              <div className="flex max-w-[92%] items-start gap-2">
+                <div className="mt-0.5 shrink-0 rounded-full bg-white shadow-sm">
+                  <XiaoAoMark size="sm" variant="logo" />
+                </div>
+                <div className="rounded-[8px] border border-white bg-white/75 px-3 py-2.5 text-[var(--ink-light)] shadow-[0_12px_28px_rgba(95,143,255,0.13)]">
+                  <MarkdownView content={message.content} />
+                </div>
+              </div>
+            ) : (
+              <div className="max-w-[92%] rounded-[8px] bg-blue-50 px-3 py-2.5 text-[var(--ink)] shadow-[0_10px_24px_rgba(95,143,255,0.10)]">
+                {message.content}
+              </div>
+            )}
           </div>
         ))}
 
-        {loading && !(messages[messages.length - 1]?.role === "assistant" && messages[messages.length - 1]?.content) && (
+        {loading && (
           <div className="flex items-center gap-2 px-1 text-xs text-[var(--ink-faint)]">
             <span className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent-blue)] border-t-transparent" />
             AI 正在想一想...
@@ -430,15 +443,4 @@ function mentionTabClass(active: boolean) {
   return `flex-1 rounded-[7px] px-2 py-1.5 text-xs transition-colors ${
     active ? "bg-white text-[var(--ink)] shadow-sm" : "text-[var(--ink-faint)]"
   }`;
-}
-
-function replaceLastAssistant(messages: { role: string; content: string }[], content: string) {
-  const updated = [...messages];
-  for (let index = updated.length - 1; index >= 0; index -= 1) {
-    if (updated[index].role === "assistant") {
-      updated[index] = { role: "assistant", content };
-      return updated;
-    }
-  }
-  return [...updated, { role: "assistant", content }];
 }

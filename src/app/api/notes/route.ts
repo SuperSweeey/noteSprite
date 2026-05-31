@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { parseTags, stripMarkdown } from "@/lib/tags";
-import { ensureTagHierarchy } from "@/lib/tags-db";
+import { ensureTagHierarchy, syncTagCounts } from "@/lib/tags-db";
 import { analyzeNote } from "@/lib/ai";
 import { getAIConfig, resolveSettings } from "@/lib/ai-config";
 import { markStaleTranscriptions } from "@/lib/transcription-jobs";
@@ -16,12 +16,13 @@ export async function POST(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
     const { content } = await req.json();
-    if (!content || typeof content !== "string") {
+    if (!content || typeof content !== "string" || !content.trim()) {
       return NextResponse.json({ error: "Content is required" }, { status: 400 });
     }
 
-    const tagPaths = parseTags(content);
-    const plainText = stripMarkdown(content);
+    const cleanContent = content.trim();
+    const tagPaths = parseTags(cleanContent);
+    const plainText = stripMarkdown(cleanContent);
 
     // Step 1: ensure all tag hierarchies exist (returns ALL ids: ancestors + leaf)
     const allTagIds: string[] = [];
@@ -35,7 +36,7 @@ export async function POST(req: NextRequest) {
     const note = await prisma.note.create({
       data: {
         userId,
-        contentMd: content,
+        contentMd: cleanContent,
         plainText,
         status: "inbox",
         tags: {
@@ -47,20 +48,14 @@ export async function POST(req: NextRequest) {
       include: { tags: { include: { tag: true } } },
     });
 
-    // Step 3: increment note counts for all tags in hierarchy
-    for (const tagId of uniqueTagIds) {
-      await prisma.tag.update({
-        where: { id: tagId },
-        data: { noteCount: { increment: 1 } },
-      });
-    }
+    await syncTagCounts(userId);
 
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { settings: true } });
     const settings = resolveSettings(user?.settings);
 
     // Step 4: trigger AI analysis in background (don't wait)
-    if (settings.knowledge.autoAnalyze && !shouldSkipAIAnalysis(content)) {
-      runAIAnalysis(note.id, content);
+    if (settings.knowledge.autoAnalyze && !shouldSkipAIAnalysis(cleanContent)) {
+      runAIAnalysis(note.id, cleanContent);
     }
 
     return NextResponse.json(note, { status: 201 });

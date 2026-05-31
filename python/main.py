@@ -85,13 +85,17 @@ def main():
     configure_console()
     args = sys.argv[1:]
 
-    if "--platform" not in args or "--url" not in args:
+    has_url_input = "--platform" in args and "--url" in args
+    has_file_input = "--file" in args
+
+    if not has_url_input and not has_file_input:
         print(
             json.dumps(
                 {
                     "error": "缺少必要参数",
                     "usage": (
                         "python main.py --platform <平台> --url <链接> "
+                        "或 python main.py --file <本地音视频路径> "
                         "[--cookies <路径>] [--send notion] [--send github] "
                         "[--send flomo] [--dry-run] [--save-video]"
                     ),
@@ -103,15 +107,19 @@ def main():
         )
         sys.exit(1)
 
-    platform = args[args.index("--platform") + 1]
-    url = args[args.index("--url") + 1]
+    platform = args[args.index("--platform") + 1] if "--platform" in args else "upload"
+    url = args[args.index("--url") + 1] if "--url" in args else ""
+    file_path = args[args.index("--file") + 1] if "--file" in args else None
     cookies_path = args[args.index("--cookies") + 1] if "--cookies" in args else None
     send_targets = parse_send_targets(args)
     dry_run = "--dry-run" in args
     save_video = "--save-video" in args or "--keep-video" in args
 
-    if platform not in PLATFORMS:
+    if not has_file_input and platform not in PLATFORMS:
         print(json.dumps({"error": f"不支持的平台: {platform}", "platforms": PLATFORMS}, ensure_ascii=False))
+        sys.exit(1)
+    if has_file_input and (not file_path or not Path(file_path).exists()):
+        print(json.dumps({"error": f"本地文件不存在: {file_path}"}, ensure_ascii=False))
         sys.exit(1)
 
     task_id = str(uuid.uuid4())[:8]
@@ -123,13 +131,13 @@ def main():
     for directory in [download_dir, audio_dir, transcripts_dir]:
         directory.mkdir(parents=True, exist_ok=True)
 
-    Logger.info(f"[{task_id}] 平台: {platform} | URL: {url} | dry-run: {dry_run} | save-video: {save_video}")
+    Logger.info(f"[{task_id}] 平台: {platform} | URL: {url or '本地上传'} | dry-run: {dry_run} | save-video: {save_video}")
     if send_targets:
         Logger.info(f"[{task_id}] 分发目标: {', '.join(send_targets)}")
     else:
         Logger.info(f"[{task_id}] 仅保存本地，未指定分发目标")
 
-    downloader = get_downloader(platform)
+    downloader = get_downloader(platform) if not has_file_input else None
     oss_object = None
     uploader = None
     source_path = None
@@ -146,10 +154,16 @@ def main():
         )
         transcriber.validate_auth()
 
-        stage = "下载视频/音频"
-        Logger.step(1, 5, "下载视频/音频", task_id)
-        source_path = downloader.download(url, str(download_dir), task_id, cookies_path, audio_only=not save_video)
-        Logger.info(f"下载完成: {source_path}")
+        if has_file_input:
+            stage = "读取上传文件"
+            Logger.step(1, 5, "读取上传文件", task_id)
+            source_path = str(Path(file_path).resolve())
+            Logger.info(f"上传文件准备完成: {source_path}")
+        else:
+            stage = "下载视频/音频"
+            Logger.step(1, 5, "下载视频/音频", task_id)
+            source_path = downloader.download(url, str(download_dir), task_id, cookies_path, audio_only=not save_video)
+            Logger.info(f"下载完成: {source_path}")
 
         stage = "提取音频"
         Logger.step(2, 5, "提取音频", task_id)
@@ -157,7 +171,9 @@ def main():
         audio_path = extractor.extract(source_path, f"audio_{task_id}")
         Logger.info(f"音频准备完成: {audio_path}")
 
-        if save_video:
+        if has_file_input:
+            Logger.info(f"保留上传源文件: {Path(source_path).name}")
+        elif save_video:
             Logger.info(f"保留视频文件: {Path(source_path).name}")
         elif source_path and not same_file(source_path, audio_path):
             cleanup_file(source_path, label="临时源文件")
@@ -189,7 +205,7 @@ def main():
         if send_targets:
             stage = "分发内容"
             Logger.step(5, 5, "分发内容", task_id)
-            title = downloader.get_title(url, cookies_path) or f"{platform}_{task_id}"
+            title = (downloader.get_title(url, cookies_path) if downloader else None) or f"{platform}_{task_id}"
             dispatch_result = dispatch(
                 transcript,
                 title,
@@ -214,13 +230,15 @@ def main():
             Logger.step(5, 5, "跳过分发，仅保留转录文件", task_id)
 
         print(f"\n完成！转录文件: {transcript_path}")
-        if save_video and source_path:
+        if has_file_input and source_path:
+            print(f"上传源文件: {source_path}\n")
+        elif save_video and source_path:
             print(f"保留的视频文件: {source_path}\n")
         else:
             print("")
 
     except Exception as exc:
-        cleanup_file(source_path, keep=save_video, label="临时源文件")
+        cleanup_file(source_path, keep=save_video or has_file_input, label="临时源文件")
         error_result = {
             "task_id": task_id,
             "task_status": "failed",

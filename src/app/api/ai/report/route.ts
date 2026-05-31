@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { buildSpiritPrompt, getAIConfig, getSpiritConfig } from "@/lib/ai-config";
+import { cleanAIOutput, modelWasTruncated, pickAssistantContent } from "@/lib/ai-output";
 
 function isFailedTranscription(note: { status: string; contentMd: string }) {
   return note.status === "failed" || /\[失败\]|转写失败|转录失败/.test(note.contentMd || "");
@@ -11,7 +12,8 @@ export async function PUT(req: NextRequest) {
   try {
     const userId = await getCurrentUserId();
     const { noteId, report } = await req.json();
-    if (!noteId || !report) {
+    const cleanReport = cleanAIOutput(report);
+    if (!noteId || !cleanReport) {
       return NextResponse.json({ error: "missing params" }, { status: 400 });
     }
 
@@ -28,10 +30,10 @@ export async function PUT(req: NextRequest) {
         keyPoints: "[]",
         keywords: "[]",
         suggestedTags: "[]",
-        actionItems: report,
+        actionItems: cleanReport,
         reviewQuestions: "[]",
       },
-      update: { actionItems: report },
+      update: { actionItems: cleanReport },
     });
 
     return NextResponse.json({ ok: true });
@@ -79,6 +81,7 @@ export async function POST(req: NextRequest) {
     }
 
     const systemPrompt = buildSpiritPrompt(spirit, config.prompt);
+    const maxTokens = 4200;
 
     const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
@@ -92,7 +95,7 @@ export async function POST(req: NextRequest) {
             content: `请完整解读这条笔记，尽量让解读稿可以替代原文阅读。\n\n笔记原文：\n${note.contentMd.slice(0, 9000)}`,
           },
         ],
-        max_tokens: 1800,
+        max_tokens: maxTokens,
         temperature: 0.45,
       }),
     });
@@ -106,7 +109,18 @@ export async function POST(req: NextRequest) {
     }
 
     const json = await resp.json();
-    const report = json.choices?.[0]?.message?.content || "";
+    const choice = json.choices?.[0] || {};
+    const report = pickAssistantContent(choice);
+    if (!report) {
+      return NextResponse.json({ report: "", error: "模型没有返回可用的解读内容，请稍后重试。" });
+    }
+    if (modelWasTruncated(choice)) {
+      return NextResponse.json({
+        report,
+        error: "AI 解读被模型长度上限截断了，这次不会保存为完整解读。请点击重新解读，或在设置里换用更大输出长度的模型。",
+        truncated: true,
+      });
+    }
 
     await prisma.aIResult.upsert({
       where: { noteId },

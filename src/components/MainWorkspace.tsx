@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { stripMarkdown } from "@/lib/tags";
 
@@ -33,9 +33,8 @@ export function MainWorkspace({
 }) {
   const router = useRouter();
   const [content, setContent] = useState("");
-  const [mode, setMode] = useState<"write" | "link">("write");
-  const [linkUrl, setLinkUrl] = useState("");
-  const [linkMsg, setLinkMsg] = useState("");
+  const [dropFile, setDropFile] = useState<File | null>(null);
+  const [dropMsg, setDropMsg] = useState("");
   const [saving, setSaving] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
@@ -71,58 +70,61 @@ export function MainWorkspace({
     return () => clearInterval(timer);
   }, [fetchNotes, hasProcessing]);
 
-  const save = async () => {
+  const submitDrop = async () => {
     const text = content.trim();
-    if (!text || saving) return;
+    if ((!text && !dropFile) || saving) return;
     setSaving(true);
-    const resp = await fetch("/api/notes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: text }),
-    });
-    if (resp.ok) {
-      setContent("");
-      fetchNotes();
+    setDropMsg(dropFile ? "正在接收文件..." : "正在识别内容...");
+    try {
+      let resp: Response;
+      if (dropFile) {
+        const form = new FormData();
+        form.append("file", dropFile);
+        resp = await fetch("/api/drop", { method: "POST", body: form });
+      } else {
+        resp = await fetch("/api/drop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+      }
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        setContent("");
+        setDropFile(null);
+        setDropMsg(data.message || "已经收好。");
+        await fetchNotes();
+        setTimeout(() => setDropMsg(""), 1800);
+      } else {
+        setDropMsg(data.error || "这次没有收好。");
+      }
+    } catch (e: any) {
+      setDropMsg(e.message || "网络请求失败，请稍后再试。");
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-  };
-
-  const submitLink = async () => {
-    const url = linkUrl.trim();
-    if (!url || saving) return;
-    setSaving(true);
-    setLinkMsg("AI 正在识别这条链接...");
-    const resp = await fetch("/api/transcribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (resp.ok) {
-      setLinkUrl("");
-      setLinkMsg("");
-      fetchNotes();
-    } else {
-      setLinkMsg(data.error || "这条链接暂时没有收好。");
-    }
-    setSaving(false);
   };
 
   const retryTranscribe = async (e: React.MouseEvent, noteId: string) => {
     e.stopPropagation();
     if (retryingId) return;
     setRetryingId(noteId);
-    const resp = await fetch("/api/transcribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ noteId }),
-    });
-    if (!resp.ok) {
-      const data = await resp.json().catch(() => ({}));
-      alert(data.error || "重新转录启动失败");
+    try {
+      const resp = await fetch("/api/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ noteId }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        alert(data.error || "重新转录启动失败");
+      }
+      await fetchNotes();
+    } catch {
+      alert("网络请求失败，重新转录没有启动。");
+    } finally {
+      setRetryingId(null);
     }
-    await fetchNotes();
-    setRetryingId(null);
   };
 
   const groups = useMemo(() => groupTimeline(notes), [notes]);
@@ -149,16 +151,13 @@ export function MainWorkspace({
           <Composer
             open={composerOpen}
             setOpen={setComposerOpen}
-            mode={mode}
-            setMode={setMode}
             content={content}
             setContent={setContent}
             saving={saving}
-            save={save}
-            linkUrl={linkUrl}
-            setLinkUrl={setLinkUrl}
-            submitLink={submitLink}
-            linkMsg={linkMsg}
+            submitDrop={submitDrop}
+            dropFile={dropFile}
+            setDropFile={setDropFile}
+            dropMsg={dropMsg}
           />
 
           <div className="mt-12 flex items-center justify-between">
@@ -184,7 +183,7 @@ export function MainWorkspace({
                 <section key={group.label} className="grid gap-3 md:grid-cols-[56px_1fr]">
                   <div className="pt-1 md:text-right">
                     <p className="text-[13px] font-medium text-[#1d1d1f]">{group.label}</p>
-                    <p className="mt-1 text-[11px] text-[#a0a4ad]">{group.notes.length} 页</p>
+                    <p className="mt-1 text-[11px] text-[#a0a4ad]">{group.notes.length} 条</p>
                   </div>
                   <div className="relative space-y-3 border-l border-[#e4e6eb] pl-5">
                     {group.notes.map((note) => (
@@ -227,86 +226,95 @@ export function MainWorkspace({
 function Composer({
   open,
   setOpen,
-  mode,
-  setMode,
   content,
   setContent,
   saving,
-  save,
-  linkUrl,
-  setLinkUrl,
-  submitLink,
-  linkMsg,
+  submitDrop,
+  dropFile,
+  setDropFile,
+  dropMsg,
 }: {
   open: boolean;
   setOpen: (value: boolean) => void;
-  mode: "write" | "link";
-  setMode: (mode: "write" | "link") => void;
   content: string;
   setContent: (value: string) => void;
   saving: boolean;
-  save: () => void;
-  linkUrl: string;
-  setLinkUrl: (value: string) => void;
-  submitLink: () => void;
-  linkMsg: string;
+  submitDrop: () => void;
+  dropFile: File | null;
+  setDropFile: (value: File | null) => void;
+  dropMsg: string;
 }) {
+  const canSubmit = Boolean(content.trim() || dropFile) && !saving;
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   return (
     <section className={`rounded-[26px] bg-white/92 shadow-[0_18px_55px_rgba(15,23,42,0.065)] ring-1 ring-black/[0.045] backdrop-blur transition-all ${open ? "px-7 py-6" : "px-5 py-4"}`}>
       {!open ? (
         <button onClick={() => setOpen(true)} className="flex w-full items-center justify-between text-left">
-          <span className="text-[16px] text-[#8f96a3]">写一句，或收一条链接...</span>
+          <span className="text-[16px] text-[#8f96a3]">丢万物：文字、链接、图片、音视频...</span>
           <span className="rounded-full bg-[#1d1d1f] px-4 py-2 text-sm text-white">打开</span>
         </button>
       ) : (
-      <>
-      <div className="flex gap-5">
-        <button onClick={() => setMode("write")} className={composerTab(mode === "write")}>记一页</button>
-        <button onClick={() => setMode("link")} className={composerTab(mode === "link")}>收链接</button>
-        <button onClick={() => setOpen(false)} className="ml-auto rounded-full bg-[#f5f5f7] px-3 py-1.5 text-xs text-[#8f96a3] hover:text-[#1d1d1f]">收起</button>
-      </div>
-      {mode === "write" ? (
         <>
+          <div className="flex items-center gap-5">
+            <span className="text-[15px] font-semibold text-[#1d1d1f]">丢万物</span>
+            <button onClick={() => setOpen(false)} className="ml-auto rounded-full bg-[#f5f5f7] px-3 py-1.5 text-xs text-[#8f96a3] hover:text-[#1d1d1f]">收起</button>
+          </div>
           <textarea
             className="mt-6 min-h-[120px] w-full resize-none bg-transparent text-[21px] leading-9 text-[#1d1d1f] outline-none placeholder:text-[#a0a4ad]"
-            placeholder={pickPlaceholder()}
+            placeholder="写文字、贴链接，或者先选图片和音视频文件"
             value={content}
             onChange={(e) => setContent(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
-                save();
+                submitDrop();
               }
             }}
           />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,audio/*,video/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.avif,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.mp4,.mov,.mkv,.webm"
+            className="hidden"
+            onChange={(e) => setDropFile(e.target.files?.[0] || null)}
+          />
+          <div className="mt-3 rounded-[18px] border border-dashed border-[#d6dae3] bg-[#f8f8fa] px-5 py-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" onClick={() => fileInputRef.current?.click()} className="rounded-full bg-[#1d1d1f] px-4 py-2 text-sm text-white">
+                上传图片
+              </button>
+              <button type="button" onClick={() => fileInputRef.current?.click()} className="rounded-full bg-[#edf3ff] px-4 py-2 text-sm text-[#2563eb]">
+                上传音视频
+              </button>
+              {dropFile && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDropFile(null);
+                    if (fileInputRef.current) fileInputRef.current.value = "";
+                  }}
+                  className="rounded-full bg-white px-3 py-1.5 text-xs text-[#8f96a3] hover:text-[#1d1d1f]"
+                >
+                  移除文件
+                </button>
+              )}
+            </div>
+            <div className="mt-3">
+              <span className="block text-[15px] font-medium text-[#1d1d1f]">{dropFile ? dropFile.name : "也可以直接粘贴链接，或先写文字再丢文件"}</span>
+              <span className="mt-1 block text-sm leading-6 text-[#8f96a3]">
+                {dropFile ? `${formatFileSize(dropFile.size)} · 系统会自动判断如何处理` : "图片会保留原图；音视频会进入转录；链接直接贴在上面的输入框。"}
+              </span>
+            </div>
+          </div>
           <div className="mt-4 flex items-center justify-between">
-            <span className="text-sm text-[#8f96a3]">Ctrl + Enter 收好 · 支持 #标签/子标签</span>
-            <button onClick={save} disabled={!content.trim() || saving} className="rounded-full bg-[#1d1d1f] px-5 py-2.5 text-sm text-white disabled:bg-[#c9d3f7]">
-              {saving ? "保存中" : content.trim() ? "收好" : "保存"}
+            <span className="text-sm text-[#8f96a3]">Ctrl + Enter 提交；如果同时有文字和文件，会优先处理文件。</span>
+            <button onClick={submitDrop} disabled={!canSubmit} className="rounded-full bg-[#1d1d1f] px-5 py-2.5 text-sm text-white disabled:bg-[#c9d3f7]">
+              {saving ? "处理中..." : "丢进去"}
             </button>
           </div>
+          {dropMsg && <p className="mt-3 whitespace-pre-wrap text-sm text-[#6b7280]">{dropMsg}</p>}
         </>
-      ) : (
-        <>
-          <div className="mt-6 flex gap-3">
-            <input
-              type="url"
-              className="min-h-[56px] flex-1 rounded-[18px] bg-[#f5f5f7] px-4 text-[16px] outline-none placeholder:text-[#a0a4ad]"
-              placeholder="贴一条抖音 / B站 / YouTube / 小红书链接"
-              value={linkUrl}
-              onChange={(e) => setLinkUrl(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitLink();
-              }}
-            />
-            <button onClick={submitLink} disabled={!linkUrl.trim() || saving} className="rounded-[18px] bg-[#1d1d1f] px-5 text-sm text-white disabled:bg-[#c9d3f7]">
-              {saving ? "整理中" : "收下"}
-            </button>
-          </div>
-          {linkMsg && <p className="mt-3 text-sm text-[#6b7280]">{linkMsg}</p>}
-        </>
-      )}
-      </>
       )}
     </section>
   );
@@ -331,7 +339,7 @@ function FloatingHint({
         onClick={onToggle}
         className="fixed bottom-7 right-8 z-20 flex h-12 w-12 items-center justify-center rounded-full bg-[#1d1d1f] text-[18px] text-white shadow-[0_20px_60px_rgba(0,0,0,0.22)] transition-transform hover:-translate-y-0.5"
       >
-        ✨
+        AI
       </button>
     );
   }
@@ -339,10 +347,10 @@ function FloatingHint({
   return (
     <div className="fixed bottom-7 right-8 z-20 max-w-[360px] animate-fade-up">
       <div className="relative rounded-[24px] bg-[#1d1d1f] px-5 py-4 text-white shadow-[0_28px_85px_rgba(0,0,0,0.25)]">
-        <button onClick={onToggle} className="absolute right-3 top-3 rounded-full px-2 text-xs text-white/45 hover:text-white">×</button>
+        <button onClick={onToggle} className="absolute right-3 top-3 rounded-full px-2 text-xs text-white/45 hover:text-white">关闭</button>
         <div className="mb-2 flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-[#7dd3fc]" />
-          <span className="text-xs text-white/55">💭 {aiName} 刚冒出来</span>
+          <span className="text-xs text-white/55">{aiName} 刚冒出来</span>
         </div>
         <button onClick={onAsk} className="block text-left text-[15px] leading-7 text-white">
           {question}
@@ -394,11 +402,8 @@ function TimelineEntry({
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {note.tags?.slice(0, 4).map((nt) => <span key={nt.tag.id} className="text-xs text-[#2563eb]">#{nt.tag.fullPath}</span>)}
               {isFailed && (
-                <span
-                  onClick={onRetry}
-                  className="ml-auto rounded-full bg-red-50 px-3 py-1.5 text-xs text-red-500 hover:bg-red-100"
-                >
-                  {retrying ? "重试中" : "重新转录"}
+                <span onClick={onRetry} className="ml-auto rounded-full bg-red-50 px-3 py-1.5 text-xs text-red-500 hover:bg-red-100">
+                  {retrying ? "重试中..." : "重新转录"}
                 </span>
               )}
             </div>
@@ -420,10 +425,6 @@ function groupTimeline(notes: Note[]) {
 
 function sortByTimeline(notes: Note[]) {
   return [...notes].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-}
-
-function composerTab(active: boolean) {
-  return `pb-2 text-[15px] transition-colors ${active ? "border-b-2 border-[#2563eb] font-semibold text-[#1d1d1f]" : "border-b-2 border-transparent text-[#8f96a3] hover:text-[#1d1d1f]"}`;
 }
 
 function makeTimelinePrompt(notes: Note[], aiName: string) {
@@ -493,16 +494,26 @@ function isSameDay(a: Date, b: Date) {
 }
 
 function sourceLabel(type: string) {
-  const labels: Record<string, string> = { manual: "笔记输入", douyin: "外部资料 · 抖音", bilibili: "外部资料 · B站", youtube: "外部资料 · YouTube", xiaohongshu: "外部资料 · 小红书", link: "外部资料 · 链接", web: "外部资料 · 网页" };
+  const labels: Record<string, string> = {
+    manual: "笔记输入",
+    image: "图片笔记",
+    upload: "本地上传",
+    douyin: "外部资料 · 抖音",
+    bilibili: "外部资料 · B站",
+    youtube: "外部资料 · YouTube",
+    xiaohongshu: "外部资料 · 小红书",
+    link: "外部资料 · 链接",
+    web: "外部资料 · 网页",
+  };
   return labels[type] || `外部资料 · ${type}`;
 }
 
-function pickPlaceholder(): string {
-  const placeholders = ["一句话，也可以长成一页。", "把一闪而过的念头放在这里。", "今天有什么值得被记住？", "落笔就是整理，不用急。"];
-  return placeholders[new Date().getHours() % placeholders.length];
+function formatFileSize(size: number): string {
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / (1024 * 1024)).toFixed(size > 100 * 1024 * 1024 ? 0 : 1)} MB`;
 }
 
-function formatTime(iso: string): string {
+function formatTime(iso: string) {
   const d = new Date(iso);
   const diff = Date.now() - d.getTime();
   const minutes = Math.floor(diff / 60000);

@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { buildSpiritPrompt, getAIConfig, getSpiritConfig } from "@/lib/ai-config";
+import { cleanAIOutput, modelWasTruncated } from "@/lib/ai-output";
+
+const CHAT_MAX_TOKENS = 2600;
 
 export async function GET(req: NextRequest) {
   try {
@@ -11,12 +14,20 @@ export async function GET(req: NextRequest) {
     const listConversations = url.searchParams.get("list") === "1";
 
     if (listConversations) {
-      const conversations = await prisma.conversation.findMany({
-        where: { userId },
-        orderBy: { updatedAt: "desc" },
-        include: { messages: { take: 1, orderBy: { createdAt: "desc" }, select: { content: true } } },
-      });
-      return NextResponse.json({ conversations });
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "20", 10) || 20, 1), 50);
+      const offset = Math.max(parseInt(url.searchParams.get("offset") || "0", 10) || 0, 0);
+      const where = { userId };
+      const [conversations, total] = await Promise.all([
+        prisma.conversation.findMany({
+          where,
+          orderBy: { updatedAt: "desc" },
+          take: limit,
+          skip: offset,
+          include: { messages: { take: 1, orderBy: { createdAt: "asc" }, select: { content: true } } },
+        }),
+        prisma.conversation.count({ where }),
+      ]);
+      return NextResponse.json({ conversations, total, hasMore: offset + conversations.length < total });
     }
 
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 100);
@@ -45,10 +56,6 @@ export async function POST(req: NextRequest) {
     }
 
     let conversationId = body.conversationId || null;
-    if (!conversationId) {
-      const conv = await prisma.conversation.create({ data: { userId, title: question.slice(0, 40) } });
-      conversationId = conv.id;
-    }
 
     const dbConfig = await getAIConfig(userId, "chat");
     const baseSpirit = await getSpiritConfig(userId);
@@ -65,7 +72,7 @@ export async function POST(req: NextRequest) {
     const model = String(body.model || "").trim() || dbConfig.model;
     const injectedPrompt = buildSpiritPrompt(
       spirit,
-      "用户正在和你对话。你要优先结合当前笔记和最近笔记回答；如果用户是在学习一个问题，要按照已选择的领学模式互动。"
+      "用户正在和你对话。请只依据本轮明确提供的上下文回答：如果用户点了 @ 引用，优先回答 @ 引用内容；如果没有 @ 但在笔记详情页，才围绕当前页面笔记回答。不要假装存在上一轮对话，不要说“顺着刚刚/继续刚才”，除非历史消息里真的有相关内容。输出最终回答即可，不要展示思考过程。"
     );
     const systemPrompt = [injectedPrompt, dbConfig.prompt, String(body.prompt || "").trim()].filter(Boolean).join("\n\n");
 
@@ -73,20 +80,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         answer: "我还没有拿到可用的模型密钥。请在设置里重新填写模型 Key，或检查 .env 里的 DEEPSEEK_API_KEY。",
         conversationId,
+        authError: true,
+        persist: false,
       });
     }
 
-    await prisma.chatMessage.create({
-      data: { userId, conversationId, noteId: noteId || null, role: "user", content: question },
-    });
-    await prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
-
     const context = await buildNoteContext(userId, question, noteId, contextRefs);
-    const history = await prisma.chatMessage.findMany({
-      where: { userId, conversationId },
-      orderBy: { createdAt: "desc" },
-      take: 10,
-    });
+    const history = conversationId
+      ? await prisma.chatMessage.findMany({
+          where: { userId, conversationId },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+        })
+      : [];
     const historyMsgs = history.reverse().map((m) => ({
       role: m.role as "user" | "assistant",
       content: m.content,
@@ -96,8 +102,7 @@ export async function POST(req: NextRequest) {
         role: "system",
         content:
           systemPrompt +
-          (noteId ? "\n用户正在查看某条笔记，请优先围绕当前笔记回答。" : "") +
-          "\n如果本轮回答使用了笔记或知识库上下文，请在回答末尾用「参考笔记」列出本次实际参考的笔记标题或知识库名称；如果笔记里没有相关信息，要明确说暂时没在笔记里看到。",
+          "\n上下文优先级：1. 本轮 @ 引用；2. 当前页面笔记；3. 已存在的同一对话历史。没有明确提供的内容不要补造。回答末尾只在确实使用了笔记或知识库时用「参考笔记」列出来源；如果上下文没有相关信息，要明确说暂时没在笔记里看到。",
       },
       ...historyMsgs,
       {
@@ -107,30 +112,51 @@ export async function POST(req: NextRequest) {
     ];
 
     if (body.stream === false) {
-      const answer = await callModel({ baseUrl, apiKey, model, messages, maxTokens: 1000 });
+      const result = await callModel({ baseUrl, apiKey, model, messages, maxTokens: CHAT_MAX_TOKENS });
+      if (!result.ok) {
+        return NextResponse.json({
+          answer: formatModelConnectionError(result.status, result.text),
+          conversationId,
+          authError: isAuthStatus(result.status),
+          persist: false,
+        });
+      }
+      conversationId = await ensureConversation(userId, conversationId, question);
       await prisma.chatMessage.create({
-        data: { userId, conversationId, noteId: noteId || null, role: "assistant", content: answer },
+        data: { userId, conversationId, noteId: noteId || null, role: "user", content: question },
       });
-      return NextResponse.json({ answer, conversationId });
+      await prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
+      await prisma.chatMessage.create({
+        data: { userId, conversationId, noteId: noteId || null, role: "assistant", content: cleanAIOutput(result.answer) },
+      });
+      return NextResponse.json({ answer: cleanAIOutput(result.answer), conversationId });
     }
 
     const aiResp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages, max_tokens: 1000, temperature: 0.65, stream: true }),
+      body: JSON.stringify({ model, messages, max_tokens: CHAT_MAX_TOKENS, temperature: 0.65, stream: true }),
     });
 
     if (!aiResp.ok) {
       const text = await aiResp.text();
-      const answer = `AI 刚才没连上模型（HTTP ${aiResp.status}）。${text.slice(0, 160)}`;
-      await prisma.chatMessage.create({
-        data: { userId, conversationId, noteId: noteId || null, role: "assistant", content: answer },
+      return NextResponse.json({
+        answer: formatModelConnectionError(aiResp.status, text),
+        conversationId,
+        authError: isAuthStatus(aiResp.status),
+        persist: false,
       });
-      return NextResponse.json({ answer, conversationId });
     }
+
+    conversationId = await ensureConversation(userId, conversationId, question);
+    await prisma.chatMessage.create({
+      data: { userId, conversationId, noteId: noteId || null, role: "user", content: question },
+    });
+    await prisma.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } });
 
     const encoder = new TextEncoder();
     let fullAnswer = "";
+    let truncated = false;
     const stream = new ReadableStream({
       async start(controller) {
         const reader = aiResp.body!.getReader();
@@ -149,21 +175,29 @@ export async function POST(req: NextRequest) {
               if (data === "[DONE]") continue;
               try {
                 const json = JSON.parse(data);
-                const delta = json.choices?.[0]?.delta?.content;
+                const choice = json.choices?.[0] || {};
+                if (modelWasTruncated(choice)) truncated = true;
+                const delta = choice.delta?.content;
                 if (delta) {
                   fullAnswer += delta;
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: delta })}\n\n`));
+                  const cleanFull = cleanAIOutput(fullAnswer);
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: cleanFull, replace: true })}\n\n`));
                 }
               } catch {}
             }
           }
 
+          const cleanAnswer = cleanAIOutput(fullAnswer);
+          if (truncated) {
+            const warning = `${cleanAnswer}\n\n> 这次回答被模型长度上限截断了，没有完整结束。可以把问题拆小一点，或在设置里换用更大输出长度的模型后重试。`.trim();
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: warning, replace: true, truncated: true })}\n\n`));
+          }
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ conversationId })}\n\n`));
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
-          if (fullAnswer) {
+          if (cleanAnswer) {
             prisma.chatMessage.create({
-              data: { userId, conversationId, noteId: noteId || null, role: "assistant", content: fullAnswer },
+              data: { userId, conversationId, noteId: noteId || null, role: "assistant", content: truncated ? `${cleanAnswer}\n\n> 这次回答被模型长度上限截断了。` : cleanAnswer },
             }).catch((e) => console.error("[Chat] DB save failed:", e));
           }
         } catch (e: any) {
@@ -202,16 +236,7 @@ export async function DELETE(req: NextRequest) {
 async function buildNoteContext(userId: string, question: string, noteId?: string, contextRefs: any[] = []): Promise<string> {
   const chunks: string[] = [];
   const mentions = extractMentions(question);
-  if (noteId) {
-    const note = await prisma.note.findFirst({ where: { id: noteId, userId }, include: { aiResult: true } });
-    if (note) {
-      chunks.push("【当前笔记】");
-      chunks.push(note.contentMd.slice(0, 5000));
-      if (note.aiResult?.actionItems) {
-        chunks.push(`\n【已有 AI 解读】\n${note.aiResult.actionItems.slice(0, 3000)}`);
-      }
-    }
-  }
+  const hasExplicitContext = contextRefs.length > 0 || mentions.length > 0;
 
   for (const ref of contextRefs) {
     if (ref?.type === "knowledgeBase" && ref.id) {
@@ -224,10 +249,12 @@ async function buildNoteContext(userId: string, question: string, noteId?: strin
             take: 20,
             include: { aiResult: true, tags: { include: { tag: true } } },
           },
+          _count: { select: { notes: { where: { deletedAt: null } } } },
         },
       });
       if (kb) {
         chunks.push(`【引用知识库：${kb.name}】`);
+        chunks.push(`知识库名称：${kb.name}\n知识库总笔记数：${kb._count.notes}\n本次注入笔记数：${kb.notes.length}\n规则：如果用户询问这个知识库有几条笔记，直接回答“${kb._count.notes} 条”。`);
         chunks.push(formatKnowledgeBaseNotes(kb.notes));
       }
     }
@@ -244,6 +271,17 @@ async function buildNoteContext(userId: string, question: string, noteId?: strin
     }
   }
 
+  if (!hasExplicitContext && noteId) {
+    const note = await prisma.note.findFirst({ where: { id: noteId, userId }, include: { aiResult: true } });
+    if (note) {
+      chunks.push("【当前页面笔记】");
+      chunks.push(note.contentMd.slice(0, 6000));
+      if (note.aiResult?.actionItems) {
+        chunks.push(`\n【已有 AI 解读】\n${cleanAIOutput(note.aiResult.actionItems).slice(0, 2400)}`);
+      }
+    }
+  }
+
   for (const mention of mentions) {
     const kb = await prisma.knowledgeBase.findFirst({
       where: { userId, name: { contains: mention } },
@@ -254,10 +292,12 @@ async function buildNoteContext(userId: string, question: string, noteId?: strin
           take: 16,
           include: { aiResult: true, tags: { include: { tag: true } } },
         },
+        _count: { select: { notes: { where: { deletedAt: null } } } },
       },
     });
     if (kb) {
       chunks.push(`【@知识库：${kb.name}】`);
+      chunks.push(`知识库名称：${kb.name}\n知识库总笔记数：${kb._count.notes}\n本次注入笔记数：${kb.notes.length}\n规则：如果用户询问这个知识库有几条笔记，直接回答“${kb._count.notes} 条”。`);
       chunks.push(formatKnowledgeBaseNotes(kb.notes));
       continue;
     }
@@ -277,7 +317,8 @@ async function buildNoteContext(userId: string, question: string, noteId?: strin
     }
   }
 
-  const keywords = extractSearchTerms(question);
+  const shouldSearchRelated = !hasExplicitContext && !noteId && wantsRelatedNotes(question);
+  const keywords = shouldSearchRelated ? extractSearchTerms(question) : [];
   if (keywords.length > 0) {
     const relatedNotes = await prisma.note.findMany({
       where: {
@@ -313,26 +354,36 @@ async function buildNoteContext(userId: string, question: string, noteId?: strin
     }
   }
 
-  const recentNotes = await prisma.note.findMany({
-    where: { userId, deletedAt: null, id: noteId ? { not: noteId } : undefined },
-    orderBy: { createdAt: "desc" },
-    take: 10,
-    select: { title: true, contentMd: true, createdAt: true },
-  });
-  const recentContext = recentNotes
-    .map((note) => {
-      const date = new Date(note.createdAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
-      return `[${date}] ${note.title || note.contentMd.slice(0, 40)}\n${note.contentMd.slice(0, 280)}`;
-    })
-    .join("\n---\n")
-    .slice(0, 3000);
+  if (!hasExplicitContext && !noteId && wantsRecentNotes(question)) {
+    const recentNotes = await prisma.note.findMany({
+      where: { userId, deletedAt: null },
+      orderBy: { createdAt: "desc" },
+      take: 8,
+      select: { title: true, contentMd: true, createdAt: true },
+    });
+    const recentContext = recentNotes
+      .map((note) => {
+        const date = new Date(note.createdAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+        return `[${date}] ${note.title || note.contentMd.slice(0, 40)}\n${note.contentMd.slice(0, 280)}`;
+      })
+      .join("\n---\n")
+      .slice(0, 2600);
 
-  if (recentContext) {
-    chunks.push("【最近笔记】");
-    chunks.push(recentContext);
+    if (recentContext) {
+      chunks.push("【最近笔记】");
+      chunks.push(recentContext);
+    }
   }
 
   return chunks.join("\n\n");
+}
+
+function wantsRecentNotes(question: string): boolean {
+  return /最近|近期|这周|这一周|今天|昨天|全部笔记|所有笔记|时间线|timeline/i.test(question);
+}
+
+function wantsRelatedNotes(question: string): boolean {
+  return /相关|关联|连接|呼应|找.*笔记|搜.*笔记|检索|主题|知识库|总结|分析/.test(question);
 }
 
 function formatKnowledgeBaseNotes(notes: any[]) {
@@ -367,6 +418,26 @@ function extractSearchTerms(question: string): string[] {
   return Array.from(terms).slice(0, 5);
 }
 
+async function ensureConversation(userId: string, conversationId: string | null, question: string) {
+  if (conversationId) {
+    const existing = await prisma.conversation.findFirst({ where: { id: conversationId, userId }, select: { id: true } });
+    if (existing) return existing.id;
+  }
+  const conv = await prisma.conversation.create({ data: { userId, title: question.slice(0, 40) || "新对话" } });
+  return conv.id;
+}
+
+function isAuthStatus(status: number) {
+  return status === 401 || status === 403;
+}
+
+function formatModelConnectionError(status: number, text: string) {
+  if (isAuthStatus(status)) {
+    return `模型鉴权失败（HTTP ${status}）。请到设置页重新检测模型 Key、接口地址和模型名称；这次失败不会写入历史记录。${text.slice(0, 120)}`;
+  }
+  return `AI 刚才没连上模型（HTTP ${status}）。这次失败不会写入历史记录。${text.slice(0, 160)}`;
+}
+
 async function callModel({
   baseUrl,
   apiKey,
@@ -379,7 +450,7 @@ async function callModel({
   model: string;
   messages: any[];
   maxTokens: number;
-}): Promise<string> {
+}): Promise<{ ok: true; answer: string } | { ok: false; status: number; text: string }> {
   const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
@@ -387,8 +458,8 @@ async function callModel({
   });
   if (!resp.ok) {
     const text = await resp.text();
-    return `AI 刚才没连上模型（HTTP ${resp.status}）。${text.slice(0, 160)}`;
+    return { ok: false, status: resp.status, text };
   }
   const json = await resp.json();
-  return json.choices?.[0]?.message?.content || "";
+  return { ok: true, answer: cleanAIOutput(json.choices?.[0]?.message?.content || "") };
 }

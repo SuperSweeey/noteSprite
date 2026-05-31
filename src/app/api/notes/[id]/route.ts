@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUserId } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { parseTags, stripMarkdown } from "@/lib/tags";
-import { ensureTagHierarchy } from "@/lib/tags-db";
+import { ensureTagHierarchy, normalizeTagPath, syncTagCounts } from "@/lib/tags-db";
 import { markStaleTranscriptions } from "@/lib/transcription-jobs";
 
 export async function GET(
@@ -17,6 +17,7 @@ export async function GET(
       include: {
         tags: { include: { tag: true }, orderBy: { tag: { fullPath: "asc" } } },
         aiResult: true,
+        assets: { orderBy: { createdAt: "desc" } },
       },
     });
 
@@ -37,7 +38,7 @@ export async function PATCH(
 ) {
   try {
     const userId = await getCurrentUserId();
-    const { content, title, status, knowledgeBaseId, restore } = await req.json();
+    const { content, title, status, knowledgeBaseId, restore, tagPath } = await req.json();
 
     const note = await prisma.note.findFirst({
       where: { id: params.id, userId },
@@ -48,10 +49,14 @@ export async function PATCH(
 
     const data: any = { version: note.version + 1 };
     if (content !== undefined) {
-      data.contentMd = content;
-      data.plainText = stripMarkdown(content);
+      if (typeof content !== "string" || !content.trim()) {
+        return NextResponse.json({ error: "正文不能为空" }, { status: 400 });
+      }
+      const cleanContent = content.trim();
+      data.contentMd = cleanContent;
+      data.plainText = stripMarkdown(cleanContent);
 
-      const tagPaths = parseTags(content);
+      const tagPaths = parseTags(cleanContent);
       await prisma.noteTag.deleteMany({ where: { noteId: note.id } });
       const allIds: string[] = [];
       for (const tagPath of tagPaths) {
@@ -61,8 +66,25 @@ export async function PATCH(
       for (const tagId of Array.from(new Set(allIds))) {
         await prisma.noteTag.create({ data: { noteId: note.id, tagId } });
       }
+      await syncTagCounts(userId);
     }
-    if (title !== undefined) data.title = title;
+    if (tagPath !== undefined) {
+      const tagIds = await ensureTagHierarchy(userId, normalizeTagPath(String(tagPath)));
+      for (const tagId of Array.from(new Set(tagIds))) {
+        await prisma.noteTag.upsert({
+          where: { noteId_tagId: { noteId: note.id, tagId } },
+          update: {},
+          create: { noteId: note.id, tagId },
+        });
+      }
+      await syncTagCounts(userId);
+    }
+    if (title !== undefined) {
+      if (typeof title !== "string" || !title.trim()) {
+        return NextResponse.json({ error: "标题不能为空" }, { status: 400 });
+      }
+      data.title = title.trim();
+    }
     if (status !== undefined) data.status = status;
     if (restore) {
       data.status = "inbox";
@@ -76,6 +98,7 @@ export async function PATCH(
       include: {
         tags: { include: { tag: true }, orderBy: { tag: { fullPath: "asc" } } },
         aiResult: true,
+        assets: { orderBy: { createdAt: "desc" } },
       },
     });
 
@@ -106,7 +129,21 @@ export async function DELETE(
         return NextResponse.json({ error: "Note not found" }, { status: 404 });
       }
 
-      await prisma.noteTag.deleteMany({ where: { noteId: params.id, tagId } });
+      const tag = await prisma.tag.findFirst({
+        where: { id: tagId, userId },
+        select: { id: true, fullPath: true },
+      });
+      if (!tag) {
+        return NextResponse.json({ error: "Tag not found" }, { status: 404 });
+      }
+      const descendants = await prisma.tag.findMany({
+        where: { userId, OR: [{ id: tag.id }, { fullPath: { startsWith: `${tag.fullPath}/` } }] },
+        select: { id: true },
+      });
+      await prisma.noteTag.deleteMany({
+        where: { noteId: params.id, tagId: { in: descendants.map((item) => item.id) } },
+      });
+      await syncTagCounts(userId);
       return NextResponse.json({ ok: true });
     }
 
